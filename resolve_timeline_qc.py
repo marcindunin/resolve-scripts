@@ -21,8 +21,7 @@ IGNORE_ADJUSTMENT_CLIPS = True # Skip adjustment clips in all checks
 IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip audio clips starting with these
 CHECK_OFFLINE_MEDIA = True     # Check for offline/missing media files
 CHECK_SOURCE_END = False       # Check for clips at end of source media
-CHECK_SHORT_FADES = True       # Check for very short clip fades (1-3 frames)
-SHORT_FADE_THRESHOLD = 3       # Fades shorter than this are flagged
+# NOTE: Clip fade handles cannot be detected - Resolve API doesn't expose them
 # ====================================
 
 
@@ -440,103 +439,6 @@ def check_source_end(timeline, fps):
     return issues
 
 
-def check_short_fades(timeline, fps):
-    """Check for very short clip fades that might be unintentional"""
-    if not CHECK_SHORT_FADES:
-        return []
-
-    issues = []
-    video_track_count = timeline.GetTrackCount("video")
-
-    for track_idx in range(1, video_track_count + 1):
-        items = timeline.GetItemListInTrack("video", track_idx)
-        if not items:
-            continue
-
-        # Build list of clip positions for adjacency check
-        clip_ranges = []
-        for item in items:
-            if is_adjustment_clip(item):
-                continue
-            clip_ranges.append((item.GetStart(), item.GetEnd()))
-
-        for item in items:
-            if is_adjustment_clip(item):
-                continue
-
-            clip_start = item.GetStart()
-            clip_end = item.GetEnd()
-            clip_name = item.GetName()
-
-            try:
-                # Try to get fade properties
-                # Different Resolve versions may use different property names
-                fade_in = None
-                fade_out = None
-
-                # Try getting all properties
-                props = item.GetProperty()
-                if props and isinstance(props, dict):
-                    fade_in = props.get('FadeIn', props.get('fadeIn', props.get('Fade In', 0)))
-                    fade_out = props.get('FadeOut', props.get('fadeOut', props.get('Fade Out', 0)))
-
-                # Convert to int if needed
-                if fade_in is not None:
-                    try:
-                        fade_in = int(fade_in)
-                    except:
-                        fade_in = 0
-                else:
-                    fade_in = 0
-
-                if fade_out is not None:
-                    try:
-                        fade_out = int(fade_out)
-                    except:
-                        fade_out = 0
-                else:
-                    fade_out = 0
-
-                # Check for short fade in with adjacent clip before
-                if 0 < fade_in < SHORT_FADE_THRESHOLD:
-                    # Check if there's a clip ending where this one starts
-                    has_adjacent = any(end == clip_start for start, end in clip_ranges if end != clip_end)
-                    if has_adjacent:
-                        issues.append({
-                            'type': 'SHORT_FADE',
-                            'severity': 'WARNING',
-                            'start': clip_start,
-                            'end': clip_start + fade_in,
-                            'duration': fade_in,
-                            'track': 'V{}'.format(track_idx),
-                            'clip': clip_name,
-                            'message': 'Short fade-in on V{}: "{}" ({} frames)'.format(
-                                track_idx, clip_name, fade_in)
-                        })
-
-                # Check for short fade out with adjacent clip after
-                if 0 < fade_out < SHORT_FADE_THRESHOLD:
-                    # Check if there's a clip starting where this one ends
-                    has_adjacent = any(start == clip_end for start, end in clip_ranges if start != clip_start)
-                    if has_adjacent:
-                        issues.append({
-                            'type': 'SHORT_FADE',
-                            'severity': 'WARNING',
-                            'start': clip_end - fade_out,
-                            'end': clip_end,
-                            'duration': fade_out,
-                            'track': 'V{}'.format(track_idx),
-                            'clip': clip_name,
-                            'message': 'Short fade-out on V{}: "{}" ({} frames)'.format(
-                                track_idx, clip_name, fade_out)
-                        })
-
-            except:
-                pass
-
-    return issues
-
-
 def generate_report(issues, timeline_name, fps, timeline_start, timeline_end):
     """Generate a formatted QC report"""
     report = []
@@ -590,7 +492,6 @@ def generate_report(issues, timeline_name, fps, timeline_start, timeline_end):
         'MUTED_TRACK': 'MUTED TRACKS',
         'OFFLINE_MEDIA': 'OFFLINE MEDIA',
         'SOURCE_END': 'CLIPS AT SOURCE END',
-        'SHORT_FADE': 'SHORT CLIP FADES',
     }
 
     for itype, type_issues in issue_types.items():
@@ -672,9 +573,6 @@ def main():
 
     print("Checking for clips at source end...")
     all_issues.extend(check_source_end(timeline, fps))
-
-    print("Checking for short clip fades...")
-    all_issues.extend(check_short_fades(timeline, fps))
 
     # Generate and print report
     report = generate_report(all_issues, timeline_name, fps, timeline_start, timeline_end)
