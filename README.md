@@ -67,12 +67,18 @@ Quality Control script that checks your timeline for common issues and generates
 #### Checks performed
 
 - **Video gaps** - Frames with no video on any track
-- **Flash frames** - Very short clips (< 3 frames by default)
+- **Flash frames** - Very short clips (< 3 frames by default), filters out AAF artifacts
 - **Audio overlaps** - Two clips overlapping on the same audio track
 - **Audio gaps** - Missing audio between clips
 - **Disabled/muted clips** - Clips or tracks that may have been accidentally disabled
-- **Offline media** - Missing source files
-- **Clips at source end** - Clips trimmed to the very end of source (potential missing frames)
+- **Offline media** - Verifies source files exist on disk using file system check
+- **Clips at source end** - Clips trimmed to the very end of source (disabled by default)
+
+#### Features
+
+- Automatically skips adjustment clips in all checks
+- Filters out AAF artifacts ("Sample accurate edit", "Fade" clips)
+- Uses actual file system verification for offline media detection
 
 #### Usage
 
@@ -112,7 +118,15 @@ FLASH_FRAME_THRESHOLD = 3      # Clips shorter than this are flagged
 CHECK_AUDIO_GAPS = True        # Set False if audio gaps are intentional
 MIN_AUDIO_GAP_FRAMES = 2       # Ignore gaps smaller than this
 IGNORE_TRACK_NAMES = []        # Track names to skip (e.g., ["Music", "SFX"])
+IGNORE_ADJUSTMENT_CLIPS = True # Skip adjustment clips in all checks
+IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip audio clips starting with these
+CHECK_OFFLINE_MEDIA = True     # Check for offline/missing media files
+CHECK_SOURCE_END = False       # Check for clips at end of source media
 ```
+
+#### Known limitations
+
+- **Clip fade handles** - The Resolve scripting API does not expose clip fade handles (the fades you create by dragging clip corners). These cannot be detected by any script.
 
 ---
 
