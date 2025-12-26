@@ -17,6 +17,7 @@ FLASH_FRAME_THRESHOLD = 3      # Clips shorter than this are flagged
 CHECK_AUDIO_GAPS = True        # Set False if audio gaps are intentional
 MIN_AUDIO_GAP_FRAMES = 2       # Ignore gaps smaller than this
 IGNORE_TRACK_NAMES = []        # Track names to skip (e.g., ["Music", "SFX"])
+IGNORE_ADJUSTMENT_CLIPS = True # Skip adjustment clips in all checks
 # ====================================
 
 
@@ -39,7 +40,25 @@ def frames_to_tc(frames, fps):
     return "{:02d}:{:02d}:{:02d}:{:02d}".format(h, m, s, f)
 
 
-def get_track_items_sorted(timeline, track_type, track_index):
+def is_adjustment_clip(item):
+    """Check if a timeline item is an adjustment clip"""
+    if not IGNORE_ADJUSTMENT_CLIPS:
+        return False
+    try:
+        # Adjustment clips have no media pool item
+        media_pool_item = item.GetMediaPoolItem()
+        if media_pool_item is None:
+            return True
+        # Also check by name as fallback
+        name = item.GetName()
+        if name and "Adjustment Clip" in name:
+            return True
+    except:
+        pass
+    return False
+
+
+def get_track_items_sorted(timeline, track_type, track_index, skip_adjustment=True):
     """Get all items on a track, sorted by start position"""
     items = timeline.GetItemListInTrack(track_type, track_index)
     if not items:
@@ -47,6 +66,9 @@ def get_track_items_sorted(timeline, track_type, track_index):
 
     item_list = []
     for item in items:
+        # Skip adjustment clips for video tracks
+        if skip_adjustment and track_type == "video" and is_adjustment_clip(item):
+            continue
         item_list.append({
             'item': item,
             'name': item.GetName(),
@@ -260,6 +282,9 @@ def check_disabled_clips(timeline, fps):
         if not items:
             continue
         for item in items:
+            # Skip adjustment clips
+            if is_adjustment_clip(item):
+                continue
             # Check if clip is disabled (GetEnabled returns False)
             try:
                 # Try different property names that might indicate disabled state
@@ -312,6 +337,9 @@ def check_offline_media(timeline, fps):
         if not items:
             continue
         for item in items:
+            # Skip adjustment clips
+            if is_adjustment_clip(item):
+                continue
             try:
                 media_pool_item = item.GetMediaPoolItem()
                 if media_pool_item:
@@ -346,6 +374,9 @@ def check_source_end(timeline, fps):
         if not items:
             continue
         for item in items:
+            # Skip adjustment clips
+            if is_adjustment_clip(item):
+                continue
             try:
                 media_pool_item = item.GetMediaPoolItem()
                 if media_pool_item:
