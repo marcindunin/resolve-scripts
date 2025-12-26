@@ -19,7 +19,8 @@ MIN_AUDIO_GAP_FRAMES = 2       # Ignore gaps smaller than this
 IGNORE_TRACK_NAMES = []        # Track names to skip (e.g., ["Music", "SFX"])
 IGNORE_ADJUSTMENT_CLIPS = True # Skip adjustment clips in all checks
 IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip audio clips starting with these
-CHECK_OFFLINE_MEDIA = False    # Disabled - produces false positives
+CHECK_OFFLINE_MEDIA = True     # Check for offline/missing media files
+CHECK_SOURCE_END = False       # Check for clips at end of source media
 # ====================================
 
 
@@ -344,6 +345,8 @@ def check_disabled_clips(timeline, fps):
 
 def check_offline_media(timeline, fps):
     """Check for offline/missing media"""
+    import os
+
     if not CHECK_OFFLINE_MEDIA:
         return []
 
@@ -355,27 +358,35 @@ def check_offline_media(timeline, fps):
         if not items:
             continue
         for item in items:
-            # Skip adjustment clips
+            # Skip adjustment clips (they have no media pool item)
             if is_adjustment_clip(item):
                 continue
             try:
                 media_pool_item = item.GetMediaPoolItem()
-                if media_pool_item:
-                    clip_props = media_pool_item.GetClipProperty()
-                    if clip_props:
-                        # Check for offline status
-                        if clip_props.get('Offline') or clip_props.get('File Path') == '':
-                            issues.append({
-                                'type': 'OFFLINE_MEDIA',
-                                'severity': 'ERROR',
-                                'start': item.GetStart(),
-                                'end': item.GetEnd(),
-                                'duration': item.GetDuration(),
-                                'track': 'V{}'.format(track_idx),
-                                'clip': item.GetName(),
-                                'message': 'Offline media on V{}: "{}"'.format(
-                                    track_idx, item.GetName())
-                            })
+                if not media_pool_item:
+                    # No media pool item but not adjustment clip - might be generated
+                    continue
+
+                clip_props = media_pool_item.GetClipProperty()
+                if not clip_props:
+                    continue
+
+                # Get file path and check if it exists
+                file_path = clip_props.get('File Path')
+                if file_path and isinstance(file_path, str) and len(file_path) > 0:
+                    # Check if the file actually exists on disk
+                    if not os.path.exists(file_path):
+                        issues.append({
+                            'type': 'OFFLINE_MEDIA',
+                            'severity': 'ERROR',
+                            'start': item.GetStart(),
+                            'end': item.GetEnd(),
+                            'duration': item.GetDuration(),
+                            'track': 'V{}'.format(track_idx),
+                            'clip': item.GetName(),
+                            'message': 'Offline media on V{}: "{}"'.format(
+                                track_idx, item.GetName())
+                        })
             except:
                 pass
 
@@ -384,6 +395,9 @@ def check_offline_media(timeline, fps):
 
 def check_source_end(timeline, fps):
     """Check if clips are trimmed to the very end of source media"""
+    if not CHECK_SOURCE_END:
+        return []
+
     issues = []
 
     video_track_count = timeline.GetTrackCount("video")
