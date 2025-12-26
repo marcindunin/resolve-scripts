@@ -56,6 +56,87 @@ IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip clips starting with these prefixes
 - DaVinci Resolve 18+ (tested on Resolve 20)
 - Multitrack clips must have valid timecode matching the AAF source clips
 
+---
+
+### resolve_timeline_qc.py
+
+Quality Control script that checks your timeline for common issues and generates a report.
+
+**Use case:** Before final export, run this script to catch blank frames, audio overlaps, flash frames, and other potential issues.
+
+#### Checks performed
+
+- **Video gaps** - Frames with no video on any track
+- **Flash frames** - Very short clips (< 3 frames by default)
+- **Audio overlaps** - Two clips overlapping on the same audio track
+- **Audio gaps** - Missing audio between clips
+- **Disabled/muted clips** - Clips or tracks that may have been accidentally disabled
+- **Offline media** - Missing source files
+- **Clips at source end** - Clips trimmed to the very end of source (potential missing frames)
+
+#### Usage
+
+1. Open the timeline you want to check
+2. Run the script from: **Workspace > Scripts > resolve_timeline_qc**
+3. Review the report in the console
+
+#### Report format
+
+```
+======================================================================
+  TIMELINE QC REPORT
+======================================================================
+
+Timeline: My Project v2
+Frame Rate: 24.0 fps
+Duration: 00:00:00:00 - 01:23:45:12
+
+SUMMARY:
+  Errors:   2
+  Warnings: 5
+  Info:     3
+
+----------------------------------------------------------------------
+VIDEO GAPS (2)
+----------------------------------------------------------------------
+  [!] 00:15:32:10 - Video gap (24 frames)
+  [!] 00:45:12:03 - Video gap (12 frames)
+```
+
+#### Configuration
+
+Edit the top of the script to customize:
+
+```python
+FLASH_FRAME_THRESHOLD = 3      # Clips shorter than this are flagged
+CHECK_AUDIO_GAPS = True        # Set False if audio gaps are intentional
+MIN_AUDIO_GAP_FRAMES = 2       # Ignore gaps smaller than this
+IGNORE_TRACK_NAMES = []        # Track names to skip (e.g., ["Music", "SFX"])
+```
+
+---
+
+## Installation
+
+Copy any script to the Resolve scripts folder:
+
+**macOS:**
+```
+~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/
+```
+
+**Windows:**
+```
+%APPDATA%\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility\
+```
+
+**Linux:**
+```
+~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/
+```
+
+Then access via **Workspace > Scripts** in DaVinci Resolve.
+
 ## License
 
 MIT License - feel free to use and modify.
