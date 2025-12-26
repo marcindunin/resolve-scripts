@@ -18,6 +18,8 @@ CHECK_AUDIO_GAPS = True        # Set False if audio gaps are intentional
 MIN_AUDIO_GAP_FRAMES = 2       # Ignore gaps smaller than this
 IGNORE_TRACK_NAMES = []        # Track names to skip (e.g., ["Music", "SFX"])
 IGNORE_ADJUSTMENT_CLIPS = True # Skip adjustment clips in all checks
+IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip audio clips starting with these
+CHECK_OFFLINE_MEDIA = False    # Disabled - produces false positives
 # ====================================
 
 
@@ -55,6 +57,16 @@ def is_adjustment_clip(item):
             return True
     except:
         pass
+    return False
+
+
+def should_skip_clip(clip_name):
+    """Check if clip should be skipped based on name prefix"""
+    if not clip_name:
+        return False
+    for prefix in IGNORE_PREFIXES:
+        if clip_name.startswith(prefix):
+            return True
     return False
 
 
@@ -189,6 +201,9 @@ def check_flash_frames(timeline, fps):
     for track_idx in range(1, audio_track_count + 1):
         items = get_track_items_sorted(timeline, "audio", track_idx)
         for item in items:
+            # Skip Sample/Fade clips from AAF
+            if should_skip_clip(item['name']):
+                continue
             if item['duration'] < FLASH_FRAME_THRESHOLD:
                 issues.append({
                     'type': 'FLASH_FRAME',
@@ -329,6 +344,9 @@ def check_disabled_clips(timeline, fps):
 
 def check_offline_media(timeline, fps):
     """Check for offline/missing media"""
+    if not CHECK_OFFLINE_MEDIA:
+        return []
+
     issues = []
 
     video_track_count = timeline.GetTrackCount("video")
