@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     'ignore_prefixes': ["Sample", "Fade"],
     'check_offline_media': True,
     'check_source_end': False,
+    'check_audio_overlap': True,  # Check for active audio clips overlapping across tracks
 }
 
 # Config file path (user's home directory since __file__ not available in Resolve)
@@ -286,30 +287,108 @@ def check_flash_frames(timeline, fps):
     return issues
 
 
+def is_track_enabled(timeline, track_type, track_idx):
+    """Check if a track is enabled (not muted)"""
+    try:
+        return timeline.GetIsTrackEnabled(track_type, track_idx) != False
+    except:
+        return True  # Assume enabled if we can't check
+
+
+def is_clip_enabled(item):
+    """Check if a clip is enabled (not disabled)"""
+    try:
+        props = item.GetProperty()
+        if props and isinstance(props, dict):
+            if props.get('Disabled') == True or props.get('enabled') == False:
+                return False
+    except:
+        pass
+    return True  # Assume enabled if we can't check
+
+
 def check_audio_overlaps(timeline, fps):
-    """Check for overlapping audio clips on the same track"""
+    """Check for active audio clips overlapping across different tracks"""
+    if not _config.get('check_audio_overlap', True):
+        return []
+
     issues = []
     audio_track_count = timeline.GetTrackCount("audio")
 
+    # Collect all active audio clips with their ranges
+    active_clips = []
+
     for track_idx in range(1, audio_track_count + 1):
-        items = get_track_items_sorted(timeline, "audio", track_idx)
+        # Skip muted tracks
+        if not is_track_enabled(timeline, "audio", track_idx):
+            continue
 
-        for i in range(len(items) - 1):
-            current = items[i]
-            next_item = items[i + 1]
+        track_name = timeline.GetTrackName("audio", track_idx)
+        if track_name in _config.get('ignore_track_names', []):
+            continue
 
-            if current['end'] > next_item['start']:
-                overlap = current['end'] - next_item['start']
-                issues.append({
-                    'type': 'AUDIO_OVERLAP',
-                    'severity': 'ERROR',
-                    'start': next_item['start'],
-                    'end': current['end'],
-                    'duration': overlap,
-                    'track': 'A{}'.format(track_idx),
-                    'message': 'Audio overlap on A{}: "{}" and "{}" ({} frames)'.format(
-                        track_idx, current['name'], next_item['name'], overlap)
-                })
+        items = timeline.GetItemListInTrack("audio", track_idx)
+        if not items:
+            continue
+
+        for item in items:
+            # Skip disabled clips
+            if not is_clip_enabled(item):
+                continue
+
+            clip_name = item.GetName()
+            # Skip ignored prefixes
+            if should_skip_clip(clip_name):
+                continue
+
+            active_clips.append({
+                'item': item,
+                'name': clip_name,
+                'start': item.GetStart(),
+                'end': item.GetEnd(),
+                'track': track_idx,
+            })
+
+    # Sort by start position
+    active_clips.sort(key=lambda x: x['start'])
+
+    # Find overlaps between clips on different tracks
+    reported_overlaps = set()  # Avoid duplicate reports
+
+    for i, clip_a in enumerate(active_clips):
+        for clip_b in active_clips[i+1:]:
+            # Only check clips on different tracks
+            if clip_a['track'] == clip_b['track']:
+                continue
+
+            # Check if they overlap in time
+            # clip_b starts after clip_a (due to sorting)
+            if clip_b['start'] >= clip_a['end']:
+                # No overlap and no future clips will overlap with clip_a
+                break
+
+            # They overlap!
+            overlap_start = clip_b['start']
+            overlap_end = min(clip_a['end'], clip_b['end'])
+            overlap_duration = overlap_end - overlap_start
+
+            # Create unique key to avoid duplicates
+            key = (overlap_start, clip_a['track'], clip_b['track'])
+            if key in reported_overlaps:
+                continue
+            reported_overlaps.add(key)
+
+            issues.append({
+                'type': 'AUDIO_OVERLAP',
+                'severity': 'WARNING',
+                'start': overlap_start,
+                'end': overlap_end,
+                'duration': overlap_duration,
+                'track': 'A{}/A{}'.format(clip_a['track'], clip_b['track']),
+                'message': 'Audio overlap A{}/A{}: "{}" and "{}" ({} frames)'.format(
+                    clip_a['track'], clip_b['track'],
+                    clip_a['name'], clip_b['name'], overlap_duration)
+            })
 
     return issues
 
@@ -592,6 +671,7 @@ def show_settings_window():
             ui.Label({'Text': 'Checks to perform:', 'Weight': 0}),
 
             # Checkboxes
+            ui.CheckBox({'ID': 'CheckAudioOverlap', 'Text': 'Check audio overlaps (active clips on different tracks)', 'Checked': _config.get('check_audio_overlap', True), 'Weight': 0}),
             ui.CheckBox({'ID': 'CheckAudioGaps', 'Text': 'Check audio gaps', 'Checked': _config.get('check_audio_gaps', True), 'Weight': 0}),
             ui.CheckBox({'ID': 'CheckOfflineMedia', 'Text': 'Check offline media', 'Checked': _config.get('check_offline_media', True), 'Weight': 0}),
             ui.CheckBox({'ID': 'CheckSourceEnd', 'Text': 'Check clips at source end', 'Checked': _config.get('check_source_end', False), 'Weight': 0}),
@@ -615,6 +695,7 @@ def show_settings_window():
     def on_save(ev):
         _config['flash_frame_threshold'] = win.Find('FlashThreshold').Value
         _config['min_audio_gap_frames'] = win.Find('MinAudioGap').Value
+        _config['check_audio_overlap'] = win.Find('CheckAudioOverlap').Checked
         _config['check_audio_gaps'] = win.Find('CheckAudioGaps').Checked
         _config['check_offline_media'] = win.Find('CheckOfflineMedia').Checked
         _config['check_source_end'] = win.Find('CheckSourceEnd').Checked
