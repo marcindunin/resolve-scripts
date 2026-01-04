@@ -32,8 +32,18 @@ DEFAULT_CONFIG = {
     'check_source_end': False,
 }
 
-# Config file path (same directory as script)
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "timeline_qc_config.json")
+# Config file path (user's home directory since __file__ not available in Resolve)
+def get_config_path():
+    """Get config file path - works in Resolve environment"""
+    try:
+        # Try script directory first
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(script_dir, "timeline_qc_config.json")
+    except NameError:
+        # __file__ not defined in Resolve - use home directory
+        return os.path.join(os.path.expanduser("~"), ".timeline_qc_config.json")
+
+CONFIG_FILE = get_config_path()
 
 # Global state
 _config = DEFAULT_CONFIG.copy()
