@@ -661,7 +661,7 @@ def show_settings_window():
     win = disp.AddWindow({
         'ID': 'SettingsWin',
         'WindowTitle': 'Timeline QC - Settings',
-        'Geometry': [100, 100, 450, 400],
+        'Geometry': [100, 100, 500, 480],
         'Spacing': 10,
     }, [
         ui.VGroup({'Spacing': 5}, [
