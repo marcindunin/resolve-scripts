@@ -841,7 +841,10 @@ def show_results_window(issues, timeline):
 
     def select_current_issue():
         if issues and 0 <= _current_issue_index < len(tree_items):
-            tree.SetCurrentItem(tree_items[_current_issue_index])
+            try:
+                tree_items[_current_issue_index].Selected = True
+            except:
+                pass
 
     def jump_to_current():
         if issues and 0 <= _current_issue_index < len(issues):
@@ -937,7 +940,10 @@ def show_results_window(issues, timeline):
 
     update_position_label()
     if tree_items:
-        tree.SetCurrentItem(tree_items[0])
+        try:
+            tree_items[0].Selected = True
+        except:
+            pass
 
     win.Show()
     disp.RunLoop()
