@@ -3,6 +3,11 @@
 # ===========================================
 # Checks timeline for common issues and generates a report.
 #
+# Features:
+# - GUI for settings configuration
+# - Real-time progress display
+# - Interactive results with click-to-jump navigation
+#
 # Checks performed:
 # - Video gaps (frames with no video content)
 # - Flash frames (very short clips)
@@ -12,25 +17,86 @@
 # - Offline media
 # - Clips at end of source media
 
-# ============== CONFIG ==============
-FLASH_FRAME_THRESHOLD = 3      # Clips shorter than this are flagged
-CHECK_AUDIO_GAPS = True        # Set False if audio gaps are intentional
-MIN_AUDIO_GAP_FRAMES = 2       # Ignore gaps smaller than this
-IGNORE_TRACK_NAMES = []        # Track names to skip (e.g., ["Music", "SFX"])
-IGNORE_ADJUSTMENT_CLIPS = True # Skip adjustment clips in all checks
-IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip audio clips starting with these
-CHECK_OFFLINE_MEDIA = True     # Check for offline/missing media files
-CHECK_SOURCE_END = False       # Check for clips at end of source media
-# NOTE: Clip fade handles cannot be detected - Resolve API doesn't expose them
-# ====================================
+import json
+import os
+
+# ============== DEFAULT CONFIG ==============
+DEFAULT_CONFIG = {
+    'flash_frame_threshold': 3,
+    'check_audio_gaps': True,
+    'min_audio_gap_frames': 2,
+    'ignore_track_names': [],
+    'ignore_adjustment_clips': True,
+    'ignore_prefixes': ["Sample", "Fade"],
+    'check_offline_media': True,
+    'check_source_end': False,
+}
+
+# Config file path (same directory as script)
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "timeline_qc_config.json")
+
+# Global state
+_config = DEFAULT_CONFIG.copy()
+_resolve = None
+_fusion = None
+_ui = None
+_disp = None
+_current_issues = []
+_current_issue_index = 0
+_timeline = None
+_fps = 24.0
+
+
+def load_config():
+    """Load configuration from file"""
+    global _config
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                saved = json.load(f)
+                _config = DEFAULT_CONFIG.copy()
+                _config.update(saved)
+    except Exception as e:
+        print("Could not load config: {}".format(e))
+        _config = DEFAULT_CONFIG.copy()
+
+
+def save_config():
+    """Save configuration to file"""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(_config, f, indent=2)
+        return True
+    except Exception as e:
+        print("Could not save config: {}".format(e))
+        return False
 
 
 def get_resolve():
+    global _resolve
+    if _resolve:
+        return _resolve
     try:
         import DaVinciResolveScript as dvr
-        return dvr.scriptapp("Resolve")
+        _resolve = dvr.scriptapp("Resolve")
     except ImportError:
-        return bmd.scriptapp("Resolve")
+        _resolve = bmd.scriptapp("Resolve")
+    return _resolve
+
+
+def get_fusion():
+    global _fusion, _ui, _disp
+    if _fusion:
+        return _fusion, _ui, _disp
+    try:
+        _fusion = bmd.scriptapp("Fusion")
+        _ui = _fusion.UIManager
+        _disp = bmd.UIDispatcher(_ui)
+    except:
+        _fusion = None
+        _ui = None
+        _disp = None
+    return _fusion, _ui, _disp
 
 
 def frames_to_tc(frames, fps):
@@ -46,14 +112,12 @@ def frames_to_tc(frames, fps):
 
 def is_adjustment_clip(item):
     """Check if a timeline item is an adjustment clip"""
-    if not IGNORE_ADJUSTMENT_CLIPS:
+    if not _config.get('ignore_adjustment_clips', True):
         return False
     try:
-        # Adjustment clips have no media pool item
         media_pool_item = item.GetMediaPoolItem()
         if media_pool_item is None:
             return True
-        # Also check by name as fallback
         name = item.GetName()
         if name and "Adjustment Clip" in name:
             return True
@@ -66,7 +130,7 @@ def should_skip_clip(clip_name):
     """Check if clip should be skipped based on name prefix"""
     if not clip_name:
         return False
-    for prefix in IGNORE_PREFIXES:
+    for prefix in _config.get('ignore_prefixes', []):
         if clip_name.startswith(prefix):
             return True
     return False
@@ -80,7 +144,6 @@ def get_track_items_sorted(timeline, track_type, track_index, skip_adjustment=Tr
 
     item_list = []
     for item in items:
-        # Skip adjustment clips for video tracks
         if skip_adjustment and track_type == "video" and is_adjustment_clip(item):
             continue
         item_list.append({
@@ -95,7 +158,7 @@ def get_track_items_sorted(timeline, track_type, track_index, skip_adjustment=Tr
     return item_list
 
 
-def check_video_gaps(timeline, fps, timeline_start, timeline_end):
+def check_video_gaps(timeline, fps, timeline_start, timeline_end, progress_callback=None):
     """Check for gaps in video coverage"""
     issues = []
     video_track_count = timeline.GetTrackCount("video")
@@ -103,7 +166,6 @@ def check_video_gaps(timeline, fps, timeline_start, timeline_end):
     if video_track_count == 0:
         return issues
 
-    # Collect all video clip ranges across all tracks
     all_video_ranges = []
 
     for track_idx in range(1, video_track_count + 1):
@@ -122,10 +184,8 @@ def check_video_gaps(timeline, fps, timeline_start, timeline_end):
         })
         return issues
 
-    # Sort by start position
     all_video_ranges.sort(key=lambda x: x[0])
 
-    # Merge overlapping ranges
     merged = []
     for start, end in all_video_ranges:
         if merged and start <= merged[-1][1]:
@@ -133,8 +193,6 @@ def check_video_gaps(timeline, fps, timeline_start, timeline_end):
         else:
             merged.append((start, end))
 
-    # Check for gaps
-    # Gap at beginning
     if merged[0][0] > timeline_start:
         gap_duration = merged[0][0] - timeline_start
         issues.append({
@@ -146,7 +204,6 @@ def check_video_gaps(timeline, fps, timeline_start, timeline_end):
             'message': 'Gap at timeline start ({} frames)'.format(gap_duration)
         })
 
-    # Gaps between clips
     for i in range(len(merged) - 1):
         if merged[i][1] < merged[i+1][0]:
             gap_start = merged[i][1]
@@ -161,7 +218,6 @@ def check_video_gaps(timeline, fps, timeline_start, timeline_end):
                 'message': 'Video gap ({} frames)'.format(gap_duration)
             })
 
-    # Gap at end
     if merged[-1][1] < timeline_end:
         gap_duration = timeline_end - merged[-1][1]
         issues.append({
@@ -179,13 +235,13 @@ def check_video_gaps(timeline, fps, timeline_start, timeline_end):
 def check_flash_frames(timeline, fps):
     """Check for very short clips (flash frames)"""
     issues = []
+    threshold = _config.get('flash_frame_threshold', 3)
 
-    # Check video tracks
     video_track_count = timeline.GetTrackCount("video")
     for track_idx in range(1, video_track_count + 1):
         items = get_track_items_sorted(timeline, "video", track_idx)
         for item in items:
-            if item['duration'] < FLASH_FRAME_THRESHOLD:
+            if item['duration'] < threshold:
                 issues.append({
                     'type': 'FLASH_FRAME',
                     'severity': 'WARNING',
@@ -198,15 +254,13 @@ def check_flash_frames(timeline, fps):
                         track_idx, item['name'], item['duration'])
                 })
 
-    # Check audio tracks
     audio_track_count = timeline.GetTrackCount("audio")
     for track_idx in range(1, audio_track_count + 1):
         items = get_track_items_sorted(timeline, "audio", track_idx)
         for item in items:
-            # Skip Sample/Fade clips from AAF
             if should_skip_clip(item['name']):
                 continue
-            if item['duration'] < FLASH_FRAME_THRESHOLD:
+            if item['duration'] < threshold:
                 issues.append({
                     'type': 'FLASH_FRAME',
                     'severity': 'WARNING',
@@ -234,7 +288,6 @@ def check_audio_overlaps(timeline, fps):
             current = items[i]
             next_item = items[i + 1]
 
-            # Check if current clip extends into next clip
             if current['end'] > next_item['start']:
                 overlap = current['end'] - next_item['start']
                 issues.append({
@@ -253,15 +306,17 @@ def check_audio_overlaps(timeline, fps):
 
 def check_audio_gaps(timeline, fps):
     """Check for gaps in audio tracks"""
-    if not CHECK_AUDIO_GAPS:
+    if not _config.get('check_audio_gaps', True):
         return []
 
     issues = []
     audio_track_count = timeline.GetTrackCount("audio")
+    min_gap = _config.get('min_audio_gap_frames', 2)
+    ignore_tracks = _config.get('ignore_track_names', [])
 
     for track_idx in range(1, audio_track_count + 1):
         track_name = timeline.GetTrackName("audio", track_idx)
-        if track_name in IGNORE_TRACK_NAMES:
+        if track_name in ignore_tracks:
             continue
 
         items = get_track_items_sorted(timeline, "audio", track_idx)
@@ -273,7 +328,7 @@ def check_audio_gaps(timeline, fps):
             next_item = items[i + 1]
 
             gap = next_item['start'] - current['end']
-            if gap >= MIN_AUDIO_GAP_FRAMES:
+            if gap >= min_gap:
                 issues.append({
                     'type': 'AUDIO_GAP',
                     'severity': 'INFO',
@@ -292,19 +347,15 @@ def check_disabled_clips(timeline, fps):
     """Check for disabled or muted clips"""
     issues = []
 
-    # Check video tracks for disabled clips
     video_track_count = timeline.GetTrackCount("video")
     for track_idx in range(1, video_track_count + 1):
         items = timeline.GetItemListInTrack("video", track_idx)
         if not items:
             continue
         for item in items:
-            # Skip adjustment clips
             if is_adjustment_clip(item):
                 continue
-            # Check if clip is disabled (GetEnabled returns False)
             try:
-                # Try different property names that might indicate disabled state
                 props = item.GetProperty()
                 if props and isinstance(props, dict):
                     if props.get('Disabled') or props.get('enabled') == False:
@@ -322,11 +373,9 @@ def check_disabled_clips(timeline, fps):
             except:
                 pass
 
-    # Check for muted audio tracks
     audio_track_count = timeline.GetTrackCount("audio")
     for track_idx in range(1, audio_track_count + 1):
         try:
-            # Check if entire track is muted
             is_muted = timeline.GetIsTrackEnabled("audio", track_idx) == False
             if is_muted:
                 issues.append({
@@ -346,9 +395,7 @@ def check_disabled_clips(timeline, fps):
 
 def check_offline_media(timeline, fps):
     """Check for offline/missing media"""
-    import os
-
-    if not CHECK_OFFLINE_MEDIA:
+    if not _config.get('check_offline_media', True):
         return []
 
     issues = []
@@ -359,23 +406,19 @@ def check_offline_media(timeline, fps):
         if not items:
             continue
         for item in items:
-            # Skip adjustment clips (they have no media pool item)
             if is_adjustment_clip(item):
                 continue
             try:
                 media_pool_item = item.GetMediaPoolItem()
                 if not media_pool_item:
-                    # No media pool item but not adjustment clip - might be generated
                     continue
 
                 clip_props = media_pool_item.GetClipProperty()
                 if not clip_props:
                     continue
 
-                # Get file path and check if it exists
                 file_path = clip_props.get('File Path')
                 if file_path and isinstance(file_path, str) and len(file_path) > 0:
-                    # Check if the file actually exists on disk
                     if not os.path.exists(file_path):
                         issues.append({
                             'type': 'OFFLINE_MEDIA',
@@ -396,7 +439,7 @@ def check_offline_media(timeline, fps):
 
 def check_source_end(timeline, fps):
     """Check if clips are trimmed to the very end of source media"""
-    if not CHECK_SOURCE_END:
+    if not _config.get('check_source_end', False):
         return []
 
     issues = []
@@ -407,7 +450,6 @@ def check_source_end(timeline, fps):
         if not items:
             continue
         for item in items:
-            # Skip adjustment clips
             if is_adjustment_clip(item):
                 continue
             try:
@@ -415,12 +457,10 @@ def check_source_end(timeline, fps):
                 if media_pool_item:
                     clip_props = media_pool_item.GetClipProperty()
                     if clip_props:
-                        # Get source duration and check if we're at the end
                         source_frames = clip_props.get('Frames')
                         if source_frames:
                             source_frames = int(source_frames)
                             right_offset = item.GetRightOffset()
-                            # If right offset is 0 or very small, we're at source end
                             if right_offset is not None and right_offset <= 2:
                                 issues.append({
                                     'type': 'SOURCE_END',
@@ -439,87 +479,463 @@ def check_source_end(timeline, fps):
     return issues
 
 
-def generate_report(issues, timeline_name, fps, timeline_start, timeline_end):
-    """Generate a formatted QC report"""
-    report = []
-    report.append("")
-    report.append("=" * 70)
-    report.append("  TIMELINE QC REPORT")
-    report.append("=" * 70)
-    report.append("")
-    report.append("Timeline: {}".format(timeline_name))
-    report.append("Frame Rate: {} fps".format(fps))
-    report.append("Duration: {} - {}".format(
-        frames_to_tc(timeline_start, fps),
-        frames_to_tc(timeline_end, fps)))
-    report.append("")
+def run_qc_analysis(timeline, progress_callback=None):
+    """Run all QC checks and return issues"""
+    global _fps
+
+    _fps = float(timeline.GetSetting("timelineFrameRate"))
+    timeline_start = timeline.GetStartFrame()
+    timeline_end = timeline.GetEndFrame()
+
+    all_issues = []
+
+    if progress_callback:
+        progress_callback("Checking for video gaps...")
+    all_issues.extend(check_video_gaps(timeline, _fps, timeline_start, timeline_end))
+
+    if progress_callback:
+        progress_callback("Checking for flash frames...")
+    all_issues.extend(check_flash_frames(timeline, _fps))
+
+    if progress_callback:
+        progress_callback("Checking for audio overlaps...")
+    all_issues.extend(check_audio_overlaps(timeline, _fps))
+
+    if progress_callback:
+        progress_callback("Checking for audio gaps...")
+    all_issues.extend(check_audio_gaps(timeline, _fps))
+
+    if progress_callback:
+        progress_callback("Checking for disabled/muted clips...")
+    all_issues.extend(check_disabled_clips(timeline, _fps))
+
+    if progress_callback:
+        progress_callback("Checking for offline media...")
+    all_issues.extend(check_offline_media(timeline, _fps))
+
+    if progress_callback:
+        progress_callback("Checking for clips at source end...")
+    all_issues.extend(check_source_end(timeline, _fps))
+
+    # Sort by position
+    all_issues.sort(key=lambda x: x['start'])
+
+    return all_issues
+
+
+def jump_to_timecode(timeline, frame):
+    """Jump to a specific frame in the timeline"""
+    try:
+        timeline.SetCurrentTimecode(frames_to_tc(frame, _fps))
+    except:
+        try:
+            # Alternative method
+            resolve = get_resolve()
+            resolve.OpenPage("edit")
+            timeline.SetCurrentTimecode(frames_to_tc(frame, _fps))
+        except Exception as e:
+            print("Could not jump to timecode: {}".format(e))
+
+
+# ============== GUI WINDOWS ==============
+
+def show_settings_window():
+    """Show the settings configuration window"""
+    global _config
+
+    fusion, ui, disp = get_fusion()
+    if not fusion:
+        print("ERROR: Could not get Fusion UI")
+        return None
+
+    load_config()
+
+    win = disp.AddWindow({
+        'ID': 'SettingsWin',
+        'WindowTitle': 'Timeline QC - Settings',
+        'Geometry': [100, 100, 450, 400],
+        'Spacing': 10,
+    }, [
+        ui.VGroup({'Spacing': 5}, [
+            ui.Label({'Text': 'Timeline QC Settings', 'Font': ui.Font({'PixelSize': 18, 'Bold': True}), 'Weight': 0}),
+            ui.Label({'Text': '─' * 50, 'Weight': 0}),
+
+            # Flash frame threshold
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Flash frame threshold (frames):', 'Weight': 2}),
+                ui.SpinBox({'ID': 'FlashThreshold', 'Value': _config.get('flash_frame_threshold', 3), 'Minimum': 1, 'Maximum': 30, 'Weight': 1}),
+            ]),
+
+            # Min audio gap
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Min audio gap to report (frames):', 'Weight': 2}),
+                ui.SpinBox({'ID': 'MinAudioGap', 'Value': _config.get('min_audio_gap_frames', 2), 'Minimum': 1, 'Maximum': 100, 'Weight': 1}),
+            ]),
+
+            # Ignore prefixes
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Ignore clip prefixes (comma-separated):', 'Weight': 2}),
+                ui.LineEdit({'ID': 'IgnorePrefixes', 'Text': ', '.join(_config.get('ignore_prefixes', [])), 'Weight': 2}),
+            ]),
+
+            ui.Label({'Text': '─' * 50, 'Weight': 0}),
+            ui.Label({'Text': 'Checks to perform:', 'Weight': 0}),
+
+            # Checkboxes
+            ui.CheckBox({'ID': 'CheckAudioGaps', 'Text': 'Check audio gaps', 'Checked': _config.get('check_audio_gaps', True), 'Weight': 0}),
+            ui.CheckBox({'ID': 'CheckOfflineMedia', 'Text': 'Check offline media', 'Checked': _config.get('check_offline_media', True), 'Weight': 0}),
+            ui.CheckBox({'ID': 'CheckSourceEnd', 'Text': 'Check clips at source end', 'Checked': _config.get('check_source_end', False), 'Weight': 0}),
+            ui.CheckBox({'ID': 'IgnoreAdjustment', 'Text': 'Ignore adjustment clips', 'Checked': _config.get('ignore_adjustment_clips', True), 'Weight': 0}),
+
+            ui.Label({'Text': '', 'Weight': 1}),  # Spacer
+
+            ui.Label({'Text': '─' * 50, 'Weight': 0}),
+
+            # Buttons
+            ui.HGroup({'Weight': 0}, [
+                ui.Button({'ID': 'SaveBtn', 'Text': 'Save Settings', 'Weight': 1}),
+                ui.Button({'ID': 'StartBtn', 'Text': 'Start QC', 'Weight': 1}),
+                ui.Button({'ID': 'CancelBtn', 'Text': 'Cancel', 'Weight': 1}),
+            ]),
+        ]),
+    ])
+
+    result = {'action': None}
+
+    def on_save(ev):
+        _config['flash_frame_threshold'] = win.Find('FlashThreshold').Value
+        _config['min_audio_gap_frames'] = win.Find('MinAudioGap').Value
+        _config['check_audio_gaps'] = win.Find('CheckAudioGaps').Checked
+        _config['check_offline_media'] = win.Find('CheckOfflineMedia').Checked
+        _config['check_source_end'] = win.Find('CheckSourceEnd').Checked
+        _config['ignore_adjustment_clips'] = win.Find('IgnoreAdjustment').Checked
+
+        prefixes_text = win.Find('IgnorePrefixes').Text
+        _config['ignore_prefixes'] = [p.strip() for p in prefixes_text.split(',') if p.strip()]
+
+        if save_config():
+            print("Settings saved!")
+
+    def on_start(ev):
+        on_save(ev)  # Save settings first
+        result['action'] = 'start'
+        disp.ExitLoop()
+
+    def on_cancel(ev):
+        result['action'] = 'cancel'
+        disp.ExitLoop()
+
+    def on_close(ev):
+        result['action'] = 'cancel'
+        disp.ExitLoop()
+
+    win.On.SaveBtn.Clicked = on_save
+    win.On.StartBtn.Clicked = on_start
+    win.On.CancelBtn.Clicked = on_cancel
+    win.On.SettingsWin.Close = on_close
+
+    win.Show()
+    disp.RunLoop()
+    win.Hide()
+
+    return result['action']
+
+
+def show_progress_window(timeline):
+    """Show progress window and run analysis"""
+    global _current_issues, _timeline
+
+    _timeline = timeline
+
+    fusion, ui, disp = get_fusion()
+    if not fusion:
+        return []
+
+    win = disp.AddWindow({
+        'ID': 'ProgressWin',
+        'WindowTitle': 'Timeline QC - Analyzing...',
+        'Geometry': [100, 100, 500, 300],
+        'Spacing': 10,
+    }, [
+        ui.VGroup({'Spacing': 5}, [
+            ui.Label({'Text': 'Analyzing Timeline...', 'Font': ui.Font({'PixelSize': 16, 'Bold': True}), 'Weight': 0, 'ID': 'StatusLabel'}),
+            ui.Label({'Text': 'Timeline: ' + timeline.GetName(), 'Weight': 0}),
+            ui.Label({'Text': '─' * 60, 'Weight': 0}),
+            ui.TextEdit({'ID': 'ConsoleOutput', 'ReadOnly': True, 'Font': ui.Font({'Family': 'Consolas', 'PixelSize': 12}), 'Weight': 1}),
+            ui.Label({'Text': '─' * 60, 'Weight': 0}),
+            ui.Button({'ID': 'CloseBtn', 'Text': 'Please wait...', 'Enabled': False, 'Weight': 0}),
+        ]),
+    ])
+
+    console = win.Find('ConsoleOutput')
+    close_btn = win.Find('CloseBtn')
+    status_label = win.Find('StatusLabel')
+
+    output_lines = []
+
+    def add_output(text):
+        output_lines.append(text)
+        console.PlainText = '\n'.join(output_lines)
+
+    def on_close(ev):
+        disp.ExitLoop()
+
+    win.On.CloseBtn.Clicked = on_close
+    win.On.ProgressWin.Close = on_close
+
+    win.Show()
+
+    # Run analysis
+    add_output("Starting QC analysis...")
+    add_output("Frame rate: {} fps".format(timeline.GetSetting("timelineFrameRate")))
+    add_output("")
+
+    # We need to run analysis in steps to update UI
+    # Since Resolve scripting is single-threaded, we do it sequentially
+    _current_issues = run_qc_analysis(timeline, add_output)
+
+    add_output("")
+    add_output("=" * 50)
+    add_output("Analysis complete!")
+    add_output("")
+
+    errors = len([i for i in _current_issues if i['severity'] == 'ERROR'])
+    warnings = len([i for i in _current_issues if i['severity'] == 'WARNING'])
+    infos = len([i for i in _current_issues if i['severity'] == 'INFO'])
+
+    add_output("Results: {} errors, {} warnings, {} info".format(errors, warnings, infos))
+    add_output("Total issues: {}".format(len(_current_issues)))
+
+    status_label.Text = "Analysis Complete!"
+    close_btn.Text = "View Results"
+    close_btn.Enabled = True
+
+    disp.RunLoop()
+    win.Hide()
+
+    return _current_issues
+
+
+def show_results_window(issues, timeline):
+    """Show results window with issue list and navigation"""
+    global _current_issue_index, _timeline, _fps
+
+    _timeline = timeline
+    _fps = float(timeline.GetSetting("timelineFrameRate"))
+
+    fusion, ui, disp = get_fusion()
+    if not fusion:
+        return
+
+    _current_issue_index = 0
+
+    # Prepare issue list for display
+    issue_rows = []
+    for i, issue in enumerate(issues):
+        tc = frames_to_tc(issue['start'], _fps)
+        severity = issue['severity']
+        message = issue['message']
+        issue_rows.append({
+            'index': i,
+            'tc': tc,
+            'severity': severity,
+            'message': message,
+            'frame': issue['start']
+        })
+
+    # Summary
+    errors = len([i for i in issues if i['severity'] == 'ERROR'])
+    warnings = len([i for i in issues if i['severity'] == 'WARNING'])
+    infos = len([i for i in issues if i['severity'] == 'INFO'])
 
     if not issues:
-        report.append("  *** NO ISSUES FOUND ***")
-        report.append("")
-        report.append("=" * 70)
-        return "\n".join(report)
+        summary_text = "No issues found! Timeline passed QC."
+        summary_color = {'R': 0.2, 'G': 0.8, 'B': 0.2, 'A': 1}
+    elif errors > 0:
+        summary_text = "{} errors, {} warnings, {} info".format(errors, warnings, infos)
+        summary_color = {'R': 1, 'G': 0.3, 'B': 0.3, 'A': 1}
+    else:
+        summary_text = "{} warnings, {} info".format(warnings, infos)
+        summary_color = {'R': 1, 'G': 0.8, 'B': 0.2, 'A': 1}
 
-    # Count by severity
-    errors = [i for i in issues if i['severity'] == 'ERROR']
-    warnings = [i for i in issues if i['severity'] == 'WARNING']
-    infos = [i for i in issues if i['severity'] == 'INFO']
+    win = disp.AddWindow({
+        'ID': 'ResultsWin',
+        'WindowTitle': 'Timeline QC - Results',
+        'Geometry': [100, 100, 700, 500],
+        'Spacing': 10,
+    }, [
+        ui.VGroup({'Spacing': 5}, [
+            ui.Label({'Text': 'QC Results: ' + timeline.GetName(), 'Font': ui.Font({'PixelSize': 16, 'Bold': True}), 'Weight': 0}),
+            ui.Label({'Text': summary_text, 'Weight': 0, 'ID': 'SummaryLabel'}),
+            ui.Label({'Text': '─' * 80, 'Weight': 0}),
 
-    report.append("SUMMARY:")
-    report.append("  Errors:   {}".format(len(errors)))
-    report.append("  Warnings: {}".format(len(warnings)))
-    report.append("  Info:     {}".format(len(infos)))
-    report.append("")
+            # Issue list
+            ui.Tree({
+                'ID': 'IssueTree',
+                'Weight': 1,
+                'HeaderHidden': False,
+                'SelectionMode': 'SingleSelection',
+                'Events': {'ItemClicked': True, 'ItemDoubleClicked': True},
+            }),
 
-    # Sort issues by position
-    issues.sort(key=lambda x: x['start'])
+            ui.Label({'Text': '─' * 80, 'Weight': 0}),
 
-    # Group by type
-    issue_types = {}
-    for issue in issues:
-        itype = issue['type']
-        if itype not in issue_types:
-            issue_types[itype] = []
-        issue_types[itype].append(issue)
+            # Navigation
+            ui.HGroup({'Weight': 0, 'Spacing': 10}, [
+                ui.Label({'Text': 'Navigate:', 'Weight': 0}),
+                ui.Button({'ID': 'PrevBtn', 'Text': '< Previous', 'Weight': 1}),
+                ui.Label({'ID': 'PositionLabel', 'Text': '0 / 0', 'Alignment': {'AlignHCenter': True}, 'Weight': 1}),
+                ui.Button({'ID': 'NextBtn', 'Text': 'Next >', 'Weight': 1}),
+                ui.Button({'ID': 'JumpBtn', 'Text': 'Jump to Selected', 'Weight': 1}),
+            ]),
 
-    # Print each type
-    type_labels = {
-        'VIDEO_GAP': 'VIDEO GAPS',
-        'FLASH_FRAME': 'FLASH FRAMES',
-        'AUDIO_OVERLAP': 'AUDIO OVERLAPS',
-        'AUDIO_GAP': 'AUDIO GAPS',
-        'DISABLED_CLIP': 'DISABLED CLIPS',
-        'MUTED_TRACK': 'MUTED TRACKS',
-        'OFFLINE_MEDIA': 'OFFLINE MEDIA',
-        'SOURCE_END': 'CLIPS AT SOURCE END',
-    }
+            ui.HGroup({'Weight': 0}, [
+                ui.Button({'ID': 'ExportBtn', 'Text': 'Export Report', 'Weight': 1}),
+                ui.Button({'ID': 'CloseBtn', 'Text': 'Close', 'Weight': 1}),
+            ]),
+        ]),
+    ])
 
-    for itype, type_issues in issue_types.items():
-        report.append("-" * 70)
-        report.append("{} ({})".format(type_labels.get(itype, itype), len(type_issues)))
-        report.append("-" * 70)
+    # Setup tree
+    tree = win.Find('IssueTree')
+    tree_header = tree.NewItem()
+    tree_header.Text[0] = '#'
+    tree_header.Text[1] = 'Timecode'
+    tree_header.Text[2] = 'Severity'
+    tree_header.Text[3] = 'Issue'
+    tree.SetHeaderItem(tree_header)
+    tree.ColumnCount = 4
+    tree.ColumnWidth[0] = 40
+    tree.ColumnWidth[1] = 100
+    tree.ColumnWidth[2] = 80
+    tree.ColumnWidth[3] = 450
 
-        for issue in type_issues:
-            tc = frames_to_tc(issue['start'], fps)
-            severity_marker = {
-                'ERROR': '[!]',
-                'WARNING': '[?]',
-                'INFO': '[ ]'
-            }.get(issue['severity'], '[ ]')
+    # Populate tree
+    tree_items = []
+    for row in issue_rows:
+        item = tree.NewItem()
+        item.Text[0] = str(row['index'] + 1)
+        item.Text[1] = row['tc']
+        item.Text[2] = row['severity']
+        item.Text[3] = row['message']
+        tree.AddTopLevelItem(item)
+        tree_items.append(item)
 
-            report.append("  {} {} - {}".format(severity_marker, tc, issue['message']))
+    position_label = win.Find('PositionLabel')
 
-        report.append("")
+    def update_position_label():
+        if issues:
+            position_label.Text = "{} / {}".format(_current_issue_index + 1, len(issues))
+        else:
+            position_label.Text = "0 / 0"
 
-    report.append("=" * 70)
-    report.append("  END OF REPORT")
-    report.append("=" * 70)
-    report.append("")
+    def select_current_issue():
+        if issues and 0 <= _current_issue_index < len(tree_items):
+            tree.SetCurrentItem(tree_items[_current_issue_index])
 
-    return "\n".join(report)
+    def jump_to_current():
+        if issues and 0 <= _current_issue_index < len(issues):
+            frame = issues[_current_issue_index]['start']
+            jump_to_timecode(_timeline, frame)
+
+    def on_prev(ev):
+        global _current_issue_index
+        if issues and _current_issue_index > 0:
+            _current_issue_index -= 1
+            update_position_label()
+            select_current_issue()
+            jump_to_current()
+
+    def on_next(ev):
+        global _current_issue_index
+        if issues and _current_issue_index < len(issues) - 1:
+            _current_issue_index += 1
+            update_position_label()
+            select_current_issue()
+            jump_to_current()
+
+    def on_jump(ev):
+        jump_to_current()
+
+    def on_item_clicked(ev):
+        global _current_issue_index
+        item = ev.get('item')
+        if item:
+            try:
+                idx = int(item.Text[0]) - 1
+                if 0 <= idx < len(issues):
+                    _current_issue_index = idx
+                    update_position_label()
+            except:
+                pass
+
+    def on_item_double_clicked(ev):
+        global _current_issue_index
+        item = ev.get('item')
+        if item:
+            try:
+                idx = int(item.Text[0]) - 1
+                if 0 <= idx < len(issues):
+                    _current_issue_index = idx
+                    update_position_label()
+                    jump_to_current()
+            except:
+                pass
+
+    def on_export(ev):
+        # Generate text report
+        report_lines = []
+        report_lines.append("TIMELINE QC REPORT")
+        report_lines.append("=" * 60)
+        report_lines.append("Timeline: {}".format(timeline.GetName()))
+        report_lines.append("Frame Rate: {} fps".format(_fps))
+        report_lines.append("")
+        report_lines.append("SUMMARY: {} errors, {} warnings, {} info".format(errors, warnings, infos))
+        report_lines.append("")
+        report_lines.append("-" * 60)
+
+        for issue in issues:
+            tc = frames_to_tc(issue['start'], _fps)
+            report_lines.append("[{}] {} - {}".format(issue['severity'], tc, issue['message']))
+
+        report_lines.append("-" * 60)
+        report_lines.append("END OF REPORT")
+
+        report_text = '\n'.join(report_lines)
+
+        # Try to save to file
+        try:
+            report_path = os.path.join(os.path.expanduser("~"), "Desktop", "timeline_qc_report.txt")
+            with open(report_path, 'w') as f:
+                f.write(report_text)
+            print("Report saved to: {}".format(report_path))
+        except Exception as e:
+            print("Could not save report: {}".format(e))
+            print("\n" + report_text)
+
+    def on_close(ev):
+        disp.ExitLoop()
+
+    win.On.PrevBtn.Clicked = on_prev
+    win.On.NextBtn.Clicked = on_next
+    win.On.JumpBtn.Clicked = on_jump
+    win.On.IssueTree.ItemClicked = on_item_clicked
+    win.On.IssueTree.ItemDoubleClicked = on_item_double_clicked
+    win.On.ExportBtn.Clicked = on_export
+    win.On.CloseBtn.Clicked = on_close
+    win.On.ResultsWin.Close = on_close
+
+    update_position_label()
+    if tree_items:
+        tree.SetCurrentItem(tree_items[0])
+
+    win.Show()
+    disp.RunLoop()
+    win.Hide()
 
 
 def main():
+    """Main entry point"""
     print("")
     print("=" * 60)
     print("  Timeline Quality Control")
@@ -540,51 +956,36 @@ def main():
         print("ERROR: No timeline open")
         return
 
-    fps = float(timeline.GetSetting("timelineFrameRate"))
-    timeline_name = timeline.GetName()
-    timeline_start = timeline.GetStartFrame()
-    timeline_end = timeline.GetEndFrame()
+    fusion, ui, disp = get_fusion()
+    if not fusion:
+        print("ERROR: Could not get Fusion UI - running in console mode")
+        # Fallback to console mode
+        load_config()
+        issues = run_qc_analysis(timeline, print)
+        print("\nFound {} issues".format(len(issues)))
+        for issue in issues:
+            print("[{}] {} - {}".format(
+                issue['severity'],
+                frames_to_tc(issue['start'], _fps),
+                issue['message']
+            ))
+        return
+
+    # Show settings window
+    action = show_settings_window()
+
+    if action != 'start':
+        print("Cancelled")
+        return
+
+    # Show progress and run analysis
+    issues = show_progress_window(timeline)
+
+    # Show results
+    show_results_window(issues, timeline)
 
     print("")
-    print("Analyzing timeline: {}".format(timeline_name))
-    print("Frame rate: {} fps".format(fps))
-    print("")
-
-    all_issues = []
-
-    # Run all checks
-    print("Checking for video gaps...")
-    all_issues.extend(check_video_gaps(timeline, fps, timeline_start, timeline_end))
-
-    print("Checking for flash frames...")
-    all_issues.extend(check_flash_frames(timeline, fps))
-
-    print("Checking for audio overlaps...")
-    all_issues.extend(check_audio_overlaps(timeline, fps))
-
-    print("Checking for audio gaps...")
-    all_issues.extend(check_audio_gaps(timeline, fps))
-
-    print("Checking for disabled/muted clips...")
-    all_issues.extend(check_disabled_clips(timeline, fps))
-
-    print("Checking for offline media...")
-    all_issues.extend(check_offline_media(timeline, fps))
-
-    print("Checking for clips at source end...")
-    all_issues.extend(check_source_end(timeline, fps))
-
-    # Generate and print report
-    report = generate_report(all_issues, timeline_name, fps, timeline_start, timeline_end)
-    print(report)
-
-    # Summary
-    if all_issues:
-        errors = len([i for i in all_issues if i['severity'] == 'ERROR'])
-        if errors > 0:
-            print("ACTION REQUIRED: {} error(s) found!".format(errors))
-    else:
-        print("Timeline passed QC - no issues found!")
+    print("QC Complete!")
 
 
 if __name__ == "__main__":

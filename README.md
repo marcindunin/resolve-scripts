@@ -60,7 +60,7 @@ IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip clips starting with these prefixes
 
 ### resolve_timeline_qc.py
 
-Quality Control script that checks your timeline for common issues and generates a report.
+Quality Control script with full GUI that checks your timeline for common issues.
 
 **Use case:** Before final export, run this script to catch blank frames, audio overlaps, flash frames, and other potential issues.
 
@@ -76,53 +76,40 @@ Quality Control script that checks your timeline for common issues and generates
 
 #### Features
 
+- **Full GUI interface** with three windows:
+  - **Settings Window** - Configure all options, save settings, start QC
+  - **Progress Window** - Real-time console output during analysis
+  - **Results Window** - Interactive issue list with navigation
+- **Click-to-jump** - Double-click any issue to jump to that timecode
+- **Navigation** - Previous/Next buttons to step through issues
+- **Export Report** - Save report to Desktop as text file
+- **Persistent settings** - Configuration saved to `timeline_qc_config.json`
 - Automatically skips adjustment clips in all checks
 - Filters out AAF artifacts ("Sample accurate edit", "Fade" clips)
-- Uses actual file system verification for offline media detection
+- Falls back to console mode if GUI unavailable
 
 #### Usage
 
 1. Open the timeline you want to check
 2. Run the script from: **Workspace > Scripts > resolve_timeline_qc**
-3. Review the report in the console
+3. Configure settings in the Settings window
+4. Click **Start QC** to begin analysis
+5. Review progress in the Progress window
+6. Browse results and click issues to jump to them on the timeline
 
-#### Report format
+#### Settings
 
-```
-======================================================================
-  TIMELINE QC REPORT
-======================================================================
+All settings can be configured in the GUI:
 
-Timeline: My Project v2
-Frame Rate: 24.0 fps
-Duration: 00:00:00:00 - 01:23:45:12
-
-SUMMARY:
-  Errors:   2
-  Warnings: 5
-  Info:     3
-
-----------------------------------------------------------------------
-VIDEO GAPS (2)
-----------------------------------------------------------------------
-  [!] 00:15:32:10 - Video gap (24 frames)
-  [!] 00:45:12:03 - Video gap (12 frames)
-```
-
-#### Configuration
-
-Edit the top of the script to customize:
-
-```python
-FLASH_FRAME_THRESHOLD = 3      # Clips shorter than this are flagged
-CHECK_AUDIO_GAPS = True        # Set False if audio gaps are intentional
-MIN_AUDIO_GAP_FRAMES = 2       # Ignore gaps smaller than this
-IGNORE_TRACK_NAMES = []        # Track names to skip (e.g., ["Music", "SFX"])
-IGNORE_ADJUSTMENT_CLIPS = True # Skip adjustment clips in all checks
-IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip audio clips starting with these
-CHECK_OFFLINE_MEDIA = True     # Check for offline/missing media files
-CHECK_SOURCE_END = False       # Check for clips at end of source media
-```
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Flash frame threshold | Clips shorter than this are flagged | 3 frames |
+| Min audio gap | Ignore gaps smaller than this | 2 frames |
+| Ignore prefixes | Skip clips starting with these (comma-separated) | Sample, Fade |
+| Check audio gaps | Enable/disable audio gap detection | On |
+| Check offline media | Enable/disable offline media detection | On |
+| Check clips at source end | Enable/disable source end detection | Off |
+| Ignore adjustment clips | Skip adjustment clips in all checks | On |
 
 #### Known limitations
 
