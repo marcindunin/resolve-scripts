@@ -298,10 +298,40 @@ def is_track_enabled(timeline, track_type, track_idx):
 def is_clip_enabled(item):
     """Check if a clip is enabled (not disabled)"""
     try:
+        # Try GetProperty with specific property name
+        disabled = item.GetProperty("Disabled")
+        if disabled == True or disabled == "True" or disabled == 1:
+            return False
+
+        # Try lowercase
+        disabled = item.GetProperty("disabled")
+        if disabled == True or disabled == "True" or disabled == 1:
+            return False
+
+        # Try Enabled property
+        enabled = item.GetProperty("Enabled")
+        if enabled == False or enabled == "False" or enabled == 0:
+            return False
+
+        enabled = item.GetProperty("enabled")
+        if enabled == False or enabled == "False" or enabled == 0:
+            return False
+
+        # Try Mute property for audio clips
+        muted = item.GetProperty("Mute")
+        if muted == True or muted == "True" or muted == 1:
+            return False
+
+        # Try getting all properties as dict
         props = item.GetProperty()
         if props and isinstance(props, dict):
-            if props.get('Disabled') == True or props.get('enabled') == False:
-                return False
+            # Check various possible keys
+            for key in ['Disabled', 'disabled', 'Mute', 'mute', 'Muted', 'muted']:
+                if props.get(key) in [True, "True", 1, "1"]:
+                    return False
+            for key in ['Enabled', 'enabled']:
+                if props.get(key) in [False, "False", 0, "0"]:
+                    return False
     except:
         pass
     return True  # Assume enabled if we can't check
