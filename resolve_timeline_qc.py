@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     'check_offline_media': True,
     'check_source_end': False,
     'check_audio_overlap': True,  # Check for active audio clips overlapping across tracks
+    'min_audio_overlap_frames': 0,  # Ignore overlaps smaller than this (for transitions)
 }
 
 # Config file path (user's home directory since __file__ not available in Resolve)
@@ -368,6 +369,11 @@ def check_audio_overlaps(timeline, fps):
             overlap_end = min(clip_a['end'], clip_b['end'])
             overlap_duration = overlap_end - overlap_start
 
+            # Skip small overlaps (likely transitions)
+            min_overlap = _config.get('min_audio_overlap_frames', 0)
+            if overlap_duration <= min_overlap:
+                continue
+
             # Create unique key to avoid duplicates
             key = (overlap_start, clip_a['track'], clip_b['track'])
             if key in reported_overlaps:
@@ -655,6 +661,12 @@ def show_settings_window():
                 ui.SpinBox({'ID': 'MinAudioGap', 'Value': _config.get('min_audio_gap_frames', 2), 'Minimum': 1, 'Maximum': 100, 'Weight': 1}),
             ]),
 
+            # Min audio overlap (to ignore transitions)
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Min audio overlap to report (frames):', 'Weight': 2}),
+                ui.SpinBox({'ID': 'MinAudioOverlap', 'Value': _config.get('min_audio_overlap_frames', 0), 'Minimum': 0, 'Maximum': 100, 'Weight': 1}),
+            ]),
+
             # Ignore prefixes
             ui.HGroup({'Weight': 0}, [
                 ui.Label({'Text': 'Ignore clip prefixes (comma-separated):', 'Weight': 2}),
@@ -689,6 +701,7 @@ def show_settings_window():
     def on_save(ev):
         _config['flash_frame_threshold'] = win.Find('FlashThreshold').Value
         _config['min_audio_gap_frames'] = win.Find('MinAudioGap').Value
+        _config['min_audio_overlap_frames'] = win.Find('MinAudioOverlap').Value
         _config['check_audio_overlap'] = win.Find('CheckAudioOverlap').Checked
         _config['check_audio_gaps'] = win.Find('CheckAudioGaps').Checked
         _config['check_offline_media'] = win.Find('CheckOfflineMedia').Checked
