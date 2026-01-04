@@ -991,34 +991,20 @@ def show_results_window(issues, timeline):
 
         report_text = '\n'.join(report_lines)
 
-        # Show file save dialog
-        default_name = "QC_Report_{}.txt".format(timeline.GetName().replace(" ", "_"))
-        default_path = os.path.join(os.path.expanduser("~"), "Desktop", default_name)
+        # Save to Desktop with timeline name
+        safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in timeline.GetName())
+        default_name = "QC_Report_{}.txt".format(safe_name.replace(" ", "_"))
+        report_path = os.path.join(os.path.expanduser("~"), "Desktop", default_name)
 
         try:
-            # Use Fusion's file dialog
-            report_path = fusion.RequestFile(default_path, "txt", "Save QC Report")
-
-            if report_path:
-                # Ensure .txt extension
-                if not report_path.lower().endswith('.txt'):
-                    report_path += '.txt'
-
-                with open(report_path, 'w') as f:
-                    f.write(report_text)
-                print("Report saved to: {}".format(report_path))
-            else:
-                print("Export cancelled")
+            with open(report_path, 'w') as f:
+                f.write(report_text)
+            print("=" * 50)
+            print("Report saved to Desktop:")
+            print(report_path)
+            print("=" * 50)
         except Exception as e:
-            # Fallback to default location
-            print("File dialog failed: {}".format(e))
-            try:
-                fallback_path = os.path.join(os.path.expanduser("~"), "Desktop", default_name)
-                with open(fallback_path, 'w') as f:
-                    f.write(report_text)
-                print("Report saved to: {}".format(fallback_path))
-            except Exception as e2:
-                print("Could not save report: {}".format(e2))
+            print("Could not save report: {}".format(e))
 
     def on_close(ev):
         disp.ExitLoop()
