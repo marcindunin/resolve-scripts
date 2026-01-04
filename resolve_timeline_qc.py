@@ -916,15 +916,34 @@ def show_results_window(issues, timeline):
 
         report_text = '\n'.join(report_lines)
 
-        # Try to save to file
+        # Show file save dialog
+        default_name = "QC_Report_{}.txt".format(timeline.GetName().replace(" ", "_"))
+        default_path = os.path.join(os.path.expanduser("~"), "Desktop", default_name)
+
         try:
-            report_path = os.path.join(os.path.expanduser("~"), "Desktop", "timeline_qc_report.txt")
-            with open(report_path, 'w') as f:
-                f.write(report_text)
-            print("Report saved to: {}".format(report_path))
+            # Use Fusion's file dialog
+            report_path = fusion.RequestFile(default_path, "txt", "Save QC Report")
+
+            if report_path:
+                # Ensure .txt extension
+                if not report_path.lower().endswith('.txt'):
+                    report_path += '.txt'
+
+                with open(report_path, 'w') as f:
+                    f.write(report_text)
+                print("Report saved to: {}".format(report_path))
+            else:
+                print("Export cancelled")
         except Exception as e:
-            print("Could not save report: {}".format(e))
-            print("\n" + report_text)
+            # Fallback to default location
+            print("File dialog failed: {}".format(e))
+            try:
+                fallback_path = os.path.join(os.path.expanduser("~"), "Desktop", default_name)
+                with open(fallback_path, 'w') as f:
+                    f.write(report_text)
+                print("Report saved to: {}".format(fallback_path))
+            except Exception as e2:
+                print("Could not save report: {}".format(e2))
 
     def on_close(ev):
         disp.ExitLoop()
