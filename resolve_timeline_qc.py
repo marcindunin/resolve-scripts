@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     'check_offline_media': True,
     'check_source_end': False,
     'check_audio_overlap': True,  # Check for active audio clips overlapping across tracks
+    'check_disabled_clips': True,  # Report disabled clips on video tracks
 }
 
 # Config file path (user's home directory since __file__ not available in Resolve)
@@ -417,6 +418,10 @@ def check_audio_gaps(timeline, fps):
     ignore_tracks = _config.get('ignore_track_names', [])
 
     for track_idx in range(1, audio_track_count + 1):
+        # Skip disabled/muted tracks
+        if not is_track_enabled(timeline, "audio", track_idx):
+            continue
+
         track_name = timeline.GetTrackName("audio", track_idx)
         if track_name in ignore_tracks:
             continue
@@ -449,30 +454,33 @@ def check_disabled_clips(timeline, fps):
     """Check for disabled or muted clips"""
     issues = []
 
-    video_track_count = timeline.GetTrackCount("video")
-    for track_idx in range(1, video_track_count + 1):
-        items = timeline.GetItemListInTrack("video", track_idx)
-        if not items:
-            continue
-        for item in items:
-            if is_adjustment_clip(item):
+    # Check for disabled video clips (if enabled in settings)
+    if _config.get('check_disabled_clips', True):
+        video_track_count = timeline.GetTrackCount("video")
+        for track_idx in range(1, video_track_count + 1):
+            items = timeline.GetItemListInTrack("video", track_idx)
+            if not items:
                 continue
-            try:
-                if not is_clip_enabled(item):
-                    issues.append({
-                        'type': 'DISABLED_CLIP',
-                        'severity': 'INFO',
-                        'start': item.GetStart(),
-                        'end': item.GetEnd(),
-                        'duration': item.GetDuration(),
-                        'track': 'V{}'.format(track_idx),
-                        'clip': item.GetName(),
-                        'message': 'Disabled clip on V{}: "{}"'.format(
-                            track_idx, item.GetName())
-                    })
-            except:
-                pass
+            for item in items:
+                if is_adjustment_clip(item):
+                    continue
+                try:
+                    if not is_clip_enabled(item):
+                        issues.append({
+                            'type': 'DISABLED_CLIP',
+                            'severity': 'INFO',
+                            'start': item.GetStart(),
+                            'end': item.GetEnd(),
+                            'duration': item.GetDuration(),
+                            'track': 'V{}'.format(track_idx),
+                            'clip': item.GetName(),
+                            'message': 'Disabled clip on V{}: "{}"'.format(
+                                track_idx, item.GetName())
+                        })
+                except:
+                    pass
 
+    # Always check for muted audio tracks
     audio_track_count = timeline.GetTrackCount("audio")
     for track_idx in range(1, audio_track_count + 1):
         try:
@@ -685,6 +693,7 @@ def show_settings_window():
             ui.CheckBox({'ID': 'CheckAudioOverlap', 'Text': 'Check audio overlaps (active clips on different tracks)', 'Checked': _config.get('check_audio_overlap', True), 'Weight': 0}),
             ui.CheckBox({'ID': 'CheckAudioGaps', 'Text': 'Check audio gaps', 'Checked': _config.get('check_audio_gaps', True), 'Weight': 0}),
             ui.CheckBox({'ID': 'CheckOfflineMedia', 'Text': 'Check offline media', 'Checked': _config.get('check_offline_media', True), 'Weight': 0}),
+            ui.CheckBox({'ID': 'CheckDisabledClips', 'Text': 'Report disabled video clips', 'Checked': _config.get('check_disabled_clips', True), 'Weight': 0}),
             ui.CheckBox({'ID': 'CheckSourceEnd', 'Text': 'Check clips at source end', 'Checked': _config.get('check_source_end', False), 'Weight': 0}),
             ui.CheckBox({'ID': 'IgnoreAdjustment', 'Text': 'Ignore adjustment clips', 'Checked': _config.get('ignore_adjustment_clips', True), 'Weight': 0}),
 
@@ -709,6 +718,7 @@ def show_settings_window():
         _config['check_audio_overlap'] = win.Find('CheckAudioOverlap').Checked
         _config['check_audio_gaps'] = win.Find('CheckAudioGaps').Checked
         _config['check_offline_media'] = win.Find('CheckOfflineMedia').Checked
+        _config['check_disabled_clips'] = win.Find('CheckDisabledClips').Checked
         _config['check_source_end'] = win.Find('CheckSourceEnd').Checked
         _config['ignore_adjustment_clips'] = win.Find('IgnoreAdjustment').Checked
 
