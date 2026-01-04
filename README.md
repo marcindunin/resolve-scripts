@@ -67,8 +67,8 @@ Quality Control script with full GUI that checks your timeline for common issues
 #### Checks performed
 
 - **Video gaps** - Frames with no video on any track
-- **Flash frames** - Very short clips (< 3 frames by default), filters out AAF artifacts
-- **Audio overlaps** - Two clips overlapping on the same audio track
+- **Flash frames** - Very short clips (< 3 frames by default)
+- **Audio overlaps** - Active audio clips overlapping across different tracks
 - **Audio gaps** - Missing audio between clips
 - **Disabled/muted clips** - Clips or tracks that may have been accidentally disabled
 - **Offline media** - Verifies source files exist on disk using file system check
@@ -82,10 +82,14 @@ Quality Control script with full GUI that checks your timeline for common issues
   - **Results Window** - Interactive issue list with navigation
 - **Click-to-jump** - Double-click any issue to jump to that timecode
 - **Navigation** - Previous/Next buttons to step through issues
-- **Export Report** - Save report to Desktop as text file
-- **Persistent settings** - Configuration saved to `timeline_qc_config.json`
-- Automatically skips adjustment clips in all checks
-- Filters out AAF artifacts ("Sample accurate edit", "Fade" clips)
+- **Export Report** - Save dialog to choose location and filename
+- **Persistent settings** - Configuration saved to `~/.timeline_qc_config.json`
+- **Smart filtering:**
+  - Skips disabled/muted tracks in all checks
+  - Skips disabled clips (using `GetClipEnabled()`)
+  - Skips transition clips and clips with empty names
+  - Skips adjustment clips
+  - Filters out AAF artifacts ("Sample", "Fade" clips)
 - Falls back to console mode if GUI unavailable
 
 #### Usage
@@ -106,6 +110,7 @@ All settings can be configured in the GUI:
 | Flash frame threshold | Clips shorter than this are flagged | 3 frames |
 | Min audio gap | Ignore gaps smaller than this | 2 frames |
 | Ignore prefixes | Skip clips starting with these (comma-separated) | Sample, Fade |
+| Check audio overlaps | Detect active clips overlapping across tracks | On |
 | Check audio gaps | Enable/disable audio gap detection | On |
 | Check offline media | Enable/disable offline media detection | On |
 | Check clips at source end | Enable/disable source end detection | Off |
@@ -114,6 +119,7 @@ All settings can be configured in the GUI:
 #### Known limitations
 
 - **Clip fade handles** - The Resolve scripting API does not expose clip fade handles (the fades you create by dragging clip corners). These cannot be detected by any script.
+- **Disabled clips with transitions** - `GetClipEnabled()` may return `True` for disabled clips that have audio transitions applied. As a workaround, clips with empty names and clips named "Transition" are automatically filtered out.
 
 ---
 
