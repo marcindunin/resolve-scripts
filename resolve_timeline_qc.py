@@ -250,6 +250,10 @@ def check_flash_frames(timeline, fps):
 
     video_track_count = timeline.GetTrackCount("video")
     for track_idx in range(1, video_track_count + 1):
+        # Skip disabled/muted tracks
+        if not is_track_enabled(timeline, "video", track_idx):
+            continue
+
         items = get_track_items_sorted(timeline, "video", track_idx)
         for item in items:
             if item['duration'] < threshold:
@@ -267,6 +271,10 @@ def check_flash_frames(timeline, fps):
 
     audio_track_count = timeline.GetTrackCount("audio")
     for track_idx in range(1, audio_track_count + 1):
+        # Skip disabled/muted tracks
+        if not is_track_enabled(timeline, "audio", track_idx):
+            continue
+
         items = get_track_items_sorted(timeline, "audio", track_idx)
         for item in items:
             if should_skip_clip(item['name']):
