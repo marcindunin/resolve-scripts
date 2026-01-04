@@ -991,20 +991,94 @@ def show_results_window(issues, timeline):
 
         report_text = '\n'.join(report_lines)
 
-        # Save to Desktop with timeline name
+        # Create safe default filename
         safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in timeline.GetName())
         default_name = "QC_Report_{}.txt".format(safe_name.replace(" ", "_"))
-        report_path = os.path.join(os.path.expanduser("~"), "Desktop", default_name)
 
-        try:
-            with open(report_path, 'w') as f:
-                f.write(report_text)
-            print("=" * 50)
-            print("Report saved to Desktop:")
-            print(report_path)
-            print("=" * 50)
-        except Exception as e:
-            print("Could not save report: {}".format(e))
+        # Get Desktop path - try different methods
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        if not os.path.exists(desktop_path):
+            desktop_path = os.path.expanduser("~")
+
+        default_path = os.path.join(desktop_path, default_name)
+
+        # Show custom save dialog
+        save_result = {'path': None}
+
+        save_win = disp.AddWindow({
+            'ID': 'SaveDialog',
+            'WindowTitle': 'Save QC Report',
+            'Geometry': [200, 200, 500, 150],
+            'Spacing': 10,
+        }, [
+            ui.VGroup({'Spacing': 5}, [
+                ui.Label({'Text': 'Save report to:', 'Weight': 0}),
+                ui.HGroup({'Weight': 0}, [
+                    ui.LineEdit({'ID': 'SavePath', 'Text': default_path, 'Weight': 3}),
+                    ui.Button({'ID': 'BrowseBtn', 'Text': 'Browse...', 'Weight': 1}),
+                ]),
+                ui.HGroup({'Weight': 0}, [
+                    ui.Button({'ID': 'SaveBtn', 'Text': 'Save', 'Weight': 1}),
+                    ui.Button({'ID': 'CancelSaveBtn', 'Text': 'Cancel', 'Weight': 1}),
+                ]),
+            ]),
+        ])
+
+        def on_browse(ev):
+            # Use RequestDir to select folder
+            try:
+                folder = fusion.RequestDir(desktop_path)
+                if folder:
+                    current_name = os.path.basename(save_win.Find('SavePath').Text)
+                    if not current_name:
+                        current_name = default_name
+                    save_win.Find('SavePath').Text = os.path.join(folder, current_name)
+            except:
+                pass
+
+        def on_save_file(ev):
+            save_result['path'] = save_win.Find('SavePath').Text
+            disp.ExitLoop()
+
+        def on_cancel_save(ev):
+            save_result['path'] = None
+            disp.ExitLoop()
+
+        def on_close_save(ev):
+            save_result['path'] = None
+            disp.ExitLoop()
+
+        save_win.On.BrowseBtn.Clicked = on_browse
+        save_win.On.SaveBtn.Clicked = on_save_file
+        save_win.On.CancelSaveBtn.Clicked = on_cancel_save
+        save_win.On.SaveDialog.Close = on_close_save
+
+        save_win.Show()
+        disp.RunLoop()
+        save_win.Hide()
+
+        if save_result['path']:
+            report_path = save_result['path']
+            # Ensure .txt extension
+            if not report_path.lower().endswith('.txt'):
+                report_path += '.txt'
+
+            try:
+                # Create directory if needed
+                dir_path = os.path.dirname(report_path)
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path)
+
+                with open(report_path, 'w', encoding='utf-8') as f:
+                    f.write(report_text)
+                print("=" * 50)
+                print("Report saved to:")
+                print(report_path)
+                print("=" * 50)
+            except Exception as e:
+                print("Could not save report: {}".format(e))
+        else:
+            print("Export cancelled")
 
     def on_close(ev):
         disp.ExitLoop()
