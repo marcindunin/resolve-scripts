@@ -333,6 +333,15 @@ def check_audio_overlaps(timeline, fps):
                 continue
 
             clip_name = item.GetName()
+
+            # Skip clips with empty names (often disabled or transition artifacts)
+            if not clip_name or clip_name.strip() == "":
+                continue
+
+            # Skip transition clips
+            if clip_name.lower() == "transition":
+                continue
+
             # Skip ignored prefixes
             if should_skip_clip(clip_name):
                 continue
