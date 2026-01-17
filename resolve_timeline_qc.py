@@ -92,7 +92,10 @@ def get_resolve():
         import DaVinciResolveScript as dvr
         _resolve = dvr.scriptapp("Resolve")
     except ImportError:
-        _resolve = bmd.scriptapp("Resolve")
+        try:
+            _resolve = bmd.scriptapp("Resolve")
+        except NameError:
+            _resolve = None
     return _resolve
 
 
@@ -104,7 +107,7 @@ def get_fusion():
         _fusion = bmd.scriptapp("Fusion")
         _ui = _fusion.UIManager
         _disp = bmd.UIDispatcher(_ui)
-    except:
+    except (NameError, AttributeError):
         _fusion = None
         _ui = None
         _disp = None
@@ -133,7 +136,7 @@ def is_adjustment_clip(item):
         name = item.GetName()
         if name and "Adjustment Clip" in name:
             return True
-    except:
+    except (AttributeError, RuntimeError):
         pass
     return False
 
@@ -299,16 +302,18 @@ def check_flash_frames(timeline, fps):
 def is_track_enabled(timeline, track_type, track_idx):
     """Check if a track is enabled (not muted)"""
     try:
-        return timeline.GetIsTrackEnabled(track_type, track_idx) != False
-    except:
+        result = timeline.GetIsTrackEnabled(track_type, track_idx)
+        return result is not False
+    except (AttributeError, RuntimeError):
         return True  # Assume enabled if we can't check
 
 
 def is_clip_enabled(item):
     """Check if a clip is enabled (not disabled)"""
     try:
-        return item.GetClipEnabled() == True
-    except:
+        result = item.GetClipEnabled()
+        return result is True
+    except (AttributeError, RuntimeError):
         return True  # Assume enabled if we can't check
 
 
@@ -477,14 +482,14 @@ def check_disabled_clips(timeline, fps):
                             'message': 'Disabled clip on V{}: "{}"'.format(
                                 track_idx, item.GetName())
                         })
-                except:
+                except (AttributeError, RuntimeError):
                     pass
 
     # Always check for muted audio tracks
     audio_track_count = timeline.GetTrackCount("audio")
     for track_idx in range(1, audio_track_count + 1):
         try:
-            is_muted = timeline.GetIsTrackEnabled("audio", track_idx) == False
+            is_muted = timeline.GetIsTrackEnabled("audio", track_idx) is False
             if is_muted:
                 issues.append({
                     'type': 'MUTED_TRACK',
@@ -495,7 +500,7 @@ def check_disabled_clips(timeline, fps):
                     'track': 'A{}'.format(track_idx),
                     'message': 'Audio track A{} is muted/disabled'.format(track_idx)
                 })
-        except:
+        except (AttributeError, RuntimeError):
             pass
 
     return issues
@@ -539,7 +544,7 @@ def check_offline_media(timeline, fps):
                             'message': 'Offline media on V{}: "{}"'.format(
                                 track_idx, item.GetName())
                         })
-            except:
+            except (AttributeError, RuntimeError):
                 pass
 
     return issues
@@ -581,7 +586,7 @@ def check_source_end(timeline, fps):
                                     'message': 'Clip at source end on V{}: "{}" (right offset: {} frames)'.format(
                                         track_idx, item.GetName(), right_offset)
                                 })
-            except:
+            except (AttributeError, RuntimeError):
                 pass
 
     return issues
@@ -635,7 +640,7 @@ def jump_to_timecode(timeline, frame):
     """Jump to a specific frame in the timeline"""
     try:
         timeline.SetCurrentTimecode(frames_to_tc(frame, _fps))
-    except:
+    except (AttributeError, RuntimeError):
         try:
             # Alternative method
             resolve = get_resolve()
@@ -945,7 +950,7 @@ def show_results_window(issues, timeline):
         if issues and 0 <= _current_issue_index < len(tree_items):
             try:
                 tree_items[_current_issue_index].Selected = True
-            except:
+            except (AttributeError, RuntimeError):
                 pass
 
     def jump_to_current():
@@ -981,7 +986,7 @@ def show_results_window(issues, timeline):
                 if 0 <= idx < len(issues):
                     _current_issue_index = idx
                     update_position_label()
-            except:
+            except (AttributeError, RuntimeError):
                 pass
 
     def on_item_double_clicked(ev):
@@ -994,7 +999,7 @@ def show_results_window(issues, timeline):
                     _current_issue_index = idx
                     update_position_label()
                     jump_to_current()
-            except:
+            except (AttributeError, RuntimeError):
                 pass
 
     def on_export(ev):
@@ -1060,7 +1065,7 @@ def show_results_window(issues, timeline):
                     if not current_name:
                         current_name = default_name
                     save_win.Find('SavePath').Text = os.path.join(folder, current_name)
-            except:
+            except (AttributeError, RuntimeError):
                 pass
 
         def on_save_file(ev):
@@ -1123,7 +1128,7 @@ def show_results_window(issues, timeline):
     if tree_items:
         try:
             tree_items[0].Selected = True
-        except:
+        except (AttributeError, RuntimeError):
             pass
 
     win.Show()

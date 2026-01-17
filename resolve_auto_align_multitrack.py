@@ -9,6 +9,7 @@
 # ============== CONFIG ==============
 VIDEO_TRACK_INDEX = 1
 IGNORE_PREFIXES = ["Sample", "Fade"]
+MULTITRACK_BIN_NAME = "TRACKS"  # Default bin name to look for
 # ====================================
 
 
@@ -17,13 +18,16 @@ def get_resolve():
         import DaVinciResolveScript as dvr
         return dvr.scriptapp("Resolve")
     except ImportError:
+        try:
         return bmd.scriptapp("Resolve")
+        except NameError:
+            return None
 
 
 def get_fusion():
     try:
         return bmd.scriptapp("Fusion")
-    except:
+    except (NameError, AttributeError):
         return None
 
 
@@ -206,7 +210,7 @@ def main():
             print("")
             print("Opening bin selection dialog...")
             selected_idx = show_bin_selection_dialog(all_bins, fusion)
-        except Exception as e:
+        except (RuntimeError, AttributeError) as e:
             print("Dialog failed: {}".format(e))
             selected_idx = -1
 
