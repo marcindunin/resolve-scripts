@@ -6,11 +6,15 @@
 #
 # Author: Claude
 
-# ============== CONFIG ==============
-VIDEO_TRACK_INDEX = 1
-IGNORE_PREFIXES = ["Sample", "Fade"]
-MULTITRACK_BIN_NAME = "TRACKS"  # Default bin name to look for
-# ====================================
+# ============== DEFAULT CONFIG ==============
+DEFAULT_CONFIG = {
+    'video_track_index': 1,
+    'ignore_prefixes': ["Sample", "Fade"],
+}
+# ============================================
+
+# Global config (modified by settings dialog)
+_config = DEFAULT_CONFIG.copy()
 
 
 def get_resolve():
@@ -19,7 +23,7 @@ def get_resolve():
         return dvr.scriptapp("Resolve")
     except ImportError:
         try:
-        return bmd.scriptapp("Resolve")
+            return bmd.scriptapp("Resolve")
         except NameError:
             return None
 
@@ -83,76 +87,89 @@ def get_all_bins(folder, bins_list, path=""):
 
 
 def should_skip_clip(clip_name):
-    for prefix in IGNORE_PREFIXES:
+    for prefix in _config.get('ignore_prefixes', []):
         if clip_name.startswith(prefix):
             return True
     return False
 
 
-def show_bin_selection_dialog(bins, fusion):
-    """Show a dialog to select a bin using Fusion UI"""
+def show_settings_dialog(bins, fusion):
+    """Show settings dialog with bin selection using Fusion UI"""
+    global _config
+
     ui = fusion.UIManager
     disp = bmd.UIDispatcher(ui)
 
-    # Create dropdown options
-    bin_options = {}
-    for i, b in enumerate(bins):
-        label = "{} ({} clips)".format(b['name'], b['clip_count'])
-        bin_options[i] = label
+    result = {'bin_idx': -1, 'cancelled': True}
 
-    selected_idx = [0]  # Use list to allow modification in nested function
-    dialog_closed = [False]
-
-    # Create window
     win = disp.AddWindow({
-        'ID': 'BinSelector',
-        'WindowTitle': 'Select Multitrack Bin',
-        'Geometry': [300, 300, 400, 120],
+        'ID': 'SettingsWin',
+        'WindowTitle': 'Auto Align Multitrack - Settings',
+        'Geometry': [300, 200, 450, 220],
+        'Spacing': 10,
     }, [
-        ui.VGroup([
-            ui.Label({'Text': 'Select bin with multitrack clips:', 'Weight': 0}),
-            ui.ComboBox({'ID': 'BinCombo', 'Weight': 0}),
+        ui.VGroup({'Spacing': 5}, [
+            ui.Label({'Text': 'Auto Align Settings', 'Font': ui.Font({'PixelSize': 16, 'Bold': True}), 'Weight': 0}),
+            ui.Label({'Text': '-' * 50, 'Weight': 0}),
             ui.HGroup({'Weight': 0}, [
-                ui.Button({'ID': 'OKButton', 'Text': 'OK'}),
-                ui.Button({'ID': 'CancelButton', 'Text': 'Cancel'}),
+                ui.Label({'Text': 'Target video track:', 'Weight': 2}),
+                ui.SpinBox({'ID': 'VideoTrack', 'Value': _config.get('video_track_index', 1), 'Minimum': 1, 'Maximum': 10, 'Weight': 1}),
+            ]),
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Ignore prefixes (comma-sep):', 'Weight': 2}),
+                ui.LineEdit({'ID': 'IgnorePrefixes', 'Text': ', '.join(_config.get('ignore_prefixes', [])), 'Weight': 2}),
+            ]),
+            ui.Label({'Text': '-' * 50, 'Weight': 0}),
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Multitrack bin:', 'Weight': 1}),
+                ui.ComboBox({'ID': 'BinCombo', 'Weight': 3}),
+            ]),
+            ui.Label({'Text': '', 'Weight': 1}),
+            ui.HGroup({'Weight': 0}, [
+                ui.Button({'ID': 'StartBtn', 'Text': 'Start', 'Weight': 1}),
+                ui.Button({'ID': 'CancelBtn', 'Text': 'Cancel', 'Weight': 1}),
             ]),
         ]),
     ])
 
-    # Populate combo box
     combo = win.Find('BinCombo')
+    default_idx = 0
     for i, b in enumerate(bins):
         combo.AddItem("{} ({} clips)".format(b['name'], b['clip_count']))
-    combo.CurrentIndex = 0
+        if b['name'].upper() == 'TRACKS':
+            default_idx = i
+    combo.CurrentIndex = default_idx
 
-    def on_ok(ev):
-        selected_idx[0] = win.Find('BinCombo').CurrentIndex
-        dialog_closed[0] = True
+    def on_start(ev):
+        _config['video_track_index'] = win.Find('VideoTrack').Value
+        prefixes_text = win.Find('IgnorePrefixes').Text
+        _config['ignore_prefixes'] = [p.strip() for p in prefixes_text.split(',') if p.strip()]
+        result['bin_idx'] = win.Find('BinCombo').CurrentIndex
+        result['cancelled'] = False
         disp.ExitLoop()
 
     def on_cancel(ev):
-        selected_idx[0] = -1
-        dialog_closed[0] = True
+        result['cancelled'] = True
         disp.ExitLoop()
 
     def on_close(ev):
-        selected_idx[0] = -1
-        dialog_closed[0] = True
+        result['cancelled'] = True
         disp.ExitLoop()
 
-    win.On.OKButton.Clicked = on_ok
-    win.On.CancelButton.Clicked = on_cancel
-    win.On.BinSelector.Close = on_close
+    win.On.StartBtn.Clicked = on_start
+    win.On.CancelBtn.Clicked = on_cancel
+    win.On.SettingsWin.Close = on_close
 
     win.Show()
     disp.RunLoop()
     win.Hide()
 
-    return selected_idx[0]
+    if result['cancelled']:
+        return -1
+    return result['bin_idx']
 
 
 def show_simple_bin_list(bins):
-    """Fallback: just print bins and ask user to edit CONFIG"""
     print("")
     print("Available bins with clips:")
     print("-" * 50)
@@ -182,7 +199,6 @@ def main():
     media_pool = project.GetMediaPool()
     root_folder = media_pool.GetRootFolder()
 
-    # Use current timeline
     timeline = project.GetCurrentTimeline()
     if not timeline:
         print("ERROR: No timeline open. Please open your AAF timeline first.")
@@ -193,7 +209,6 @@ def main():
     print("Current timeline: {}".format(timeline.GetName()))
     print("Frame rate: {} fps".format(fps))
 
-    # Get all bins with clips
     all_bins = []
     get_all_bins(root_folder, all_bins)
 
@@ -201,21 +216,19 @@ def main():
         print("ERROR: No bins with clips found")
         return
 
-    # Try to show dialog, fallback to list
     fusion = get_fusion()
     selected_idx = -1
 
     if fusion:
         try:
             print("")
-            print("Opening bin selection dialog...")
-            selected_idx = show_bin_selection_dialog(all_bins, fusion)
-        except (RuntimeError, AttributeError) as e:
+            print("Opening settings dialog...")
+            selected_idx = show_settings_dialog(all_bins, fusion)
+        except (RuntimeError, AttributeError, NameError) as e:
             print("Dialog failed: {}".format(e))
             selected_idx = -1
 
     if selected_idx < 0:
-        # Fallback - show list and look for common names
         print("")
         print("Looking for bin named 'TRACKS'...")
         for i, b in enumerate(all_bins):
@@ -227,14 +240,14 @@ def main():
         if selected_idx < 0:
             show_simple_bin_list(all_bins)
             print("Could not auto-detect multitrack bin.")
-            print("Please rename your multitrack bin to 'TRACKS' and run again,")
-            print("or edit MULTITRACK_BIN_NAME in the script.")
+            print("Please rename your multitrack bin to 'TRACKS' and run again.")
             return
 
     multitrack_bin = all_bins[selected_idx]['folder']
     print("Selected bin: {}".format(multitrack_bin.GetName()))
+    print("Target video track: V{}".format(_config['video_track_index']))
+    print("Ignore prefixes: {}".format(_config['ignore_prefixes']))
 
-    # Get multitrack clips
     multitrack_clips = []
     print("")
     print("Multitrack clips found:")
@@ -257,7 +270,6 @@ def main():
         print("ERROR: No clips with valid timecode found in bin")
         return
 
-    # Get audio clips from timeline track 1
     print("")
     print("Analyzing audio track 1...")
 
@@ -279,7 +291,6 @@ def main():
         print("ERROR: No audio clips on track 1. Is this the AAF timeline?")
         return
 
-    # Process clips
     print("")
     print("Matching clips...")
     print("-" * 60)
@@ -345,15 +356,15 @@ def main():
         print("No clips to place.")
         return
 
-    # Ensure video track exists
-    while timeline.GetTrackCount("video") < VIDEO_TRACK_INDEX:
+    video_track_index = _config['video_track_index']
+
+    while timeline.GetTrackCount("video") < video_track_index:
         timeline.AddTrack("video")
 
-    # Sort and place clips
     clips_to_add.sort(key=lambda x: x['timeline_start'])
 
     print("")
-    print("Placing {} clips on V{}...".format(len(clips_to_add), VIDEO_TRACK_INDEX))
+    print("Placing {} clips on V{}...".format(len(clips_to_add), video_track_index))
     placed_count = 0
 
     for clip_info in clips_to_add:
@@ -365,7 +376,7 @@ def main():
             "startFrame": clip_info['offset'],
             "endFrame": clip_info['offset'] + clip_info['duration'],
             "mediaType": 1,
-            "trackIndex": VIDEO_TRACK_INDEX,
+            "trackIndex": video_track_index,
             "recordFrame": clip_info['timeline_start'],
         }
 
