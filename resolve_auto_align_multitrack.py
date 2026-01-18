@@ -12,10 +12,12 @@ import copy
 DEFAULT_CONFIG = {
     'video_track_index': 1,
     'ignore_prefixes': ["Sample", "Fade"],
-    'copy_audio': True,
     'create_new_timeline': True,
     'new_timeline_suffix': '_montaz',
 }
+# NOTE: Audio from Multicam clips cannot be placed via the Resolve scripting API.
+# The API returns success but nothing gets placed. This applies regardless of
+# timeline type (AAF or normal) and whether mediaType is specified or omitted.
 # ============================================
 
 # Global config (modified by settings dialog)
@@ -233,10 +235,6 @@ def show_settings_dialog(bins, fusion):
                 ui.Label({'Text': 'Timeline name suffix:', 'Weight': 2}),
                 ui.LineEdit({'ID': 'TimelineSuffix', 'Text': _config.get('new_timeline_suffix', '_montaz'), 'Weight': 2}),
             ]),
-            ui.Label({'Text': '-' * 50, 'Weight': 0}),
-            ui.HGroup({'Weight': 0}, [
-                ui.CheckBox({'ID': 'CopyAudio', 'Text': 'Include linked audio from multitrack', 'Checked': _config.get('copy_audio', True), 'Weight': 1}),
-            ]),
             ui.Label({'Text': '', 'Weight': 1}),
             ui.HGroup({'Weight': 0}, [
                 ui.Button({'ID': 'StartBtn', 'Text': 'Start', 'Weight': 1}),
@@ -260,7 +258,6 @@ def show_settings_dialog(bins, fusion):
         _config['ignore_prefixes'] = [p.strip() for p in prefixes_text.split(',') if p.strip()]
         _config['create_new_timeline'] = win.Find('CreateNewTimeline').Checked
         _config['new_timeline_suffix'] = win.Find('TimelineSuffix').Text
-        _config['copy_audio'] = win.Find('CopyAudio').Checked
         result['bin_idx'] = win.Find('BinCombo').CurrentIndex
         result['cancelled'] = False
         disp.ExitLoop()
@@ -481,14 +478,13 @@ def main():
     # Get config values
     video_track_index = _config['video_track_index']
     create_new_timeline = _config.get('create_new_timeline', False)
-    copy_audio = _config.get('copy_audio', False)
     timeline_suffix = _config.get('new_timeline_suffix', '_montaz')
 
     # Store reference to AAF timeline
     aaf_timeline = timeline
     target_timeline = timeline
 
-    # Create new timeline if requested (required for audio to work)
+    # Create new timeline if requested
     if create_new_timeline:
         print("")
         print("-" * 60)
@@ -504,11 +500,6 @@ def main():
         # Copy audio from AAF
         copy_audio_from_aaf(aaf_timeline, new_timeline, media_pool, fps)
         print("-" * 60)
-    elif copy_audio:
-        print("")
-        print("WARNING: Audio copy requires 'Create new timeline' option!")
-        print("         Audio will not be placed on AAF timeline.")
-        copy_audio = False
 
     # Ensure we have enough video tracks
     current_track_count = target_timeline.GetTrackCount("video")
@@ -525,11 +516,7 @@ def main():
     clips_to_add.sort(key=lambda x: x['timeline_start'])
 
     print("")
-    if copy_audio:
-        print("Placing {} clips on V{} with linked audio...".format(
-            len(clips_to_add), video_track_index))
-    else:
-        print("Placing {} clips on V{}...".format(len(clips_to_add), video_track_index))
+    print("Placing {} clips on V{} (video only)...".format(len(clips_to_add), video_track_index))
 
     placed_count = 0
 
@@ -537,38 +524,31 @@ def main():
         mc = clip_info['multitrack_clip']
         target_tc = frames_to_tc(clip_info['timeline_start'], fps)
 
-        # Build clip info - with or without mediaType depending on audio setting
+        # Place video only (mediaType=1)
+        # NOTE: Audio from Multicam clips cannot be placed via Resolve API
         clip_placement = {
             "mediaPoolItem": mc,
             "startFrame": clip_info['offset'],
             "endFrame": clip_info['offset'] + clip_info['duration'],
+            "mediaType": 1,
             "trackIndex": video_track_index,
             "recordFrame": clip_info['timeline_start'],
         }
-
-        # If NOT copying audio, use mediaType=1 for video only
-        # If copying audio, omit mediaType to get linked video+audio
-        if not copy_audio:
-            clip_placement["mediaType"] = 1
 
         result = media_pool.AppendToTimeline([clip_placement])
 
         if result:
             placed_count += 1
-            if copy_audio:
-                print("  Placed (V+A): {} @ {}".format(clip_info['multitrack_name'], target_tc))
-            else:
-                print("  Placed: {} @ {}".format(clip_info['multitrack_name'], target_tc))
+            print("  Placed: {} @ {}".format(clip_info['multitrack_name'], target_tc))
         else:
             print("  FAILED: {}".format(clip_info['name']))
 
     print("")
     print("=" * 60)
-    print("  DONE! Placed {}/{} clips".format(placed_count, len(clips_to_add)))
-    if copy_audio:
-        print("  (with linked audio)")
+    print("  DONE! Placed {}/{} video clips".format(placed_count, len(clips_to_add)))
     if create_new_timeline:
         print("  New timeline: {}".format(target_timeline.GetName()))
+    print("  NOTE: Audio from multitrack must be added manually")
     print("=" * 60)
     print("")
 
