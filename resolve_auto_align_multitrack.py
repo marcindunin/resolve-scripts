@@ -6,6 +6,8 @@
 #
 # Author: Claude
 
+import copy
+
 # ============== DEFAULT CONFIG ==============
 DEFAULT_CONFIG = {
     'video_track_index': 1,
@@ -14,7 +16,7 @@ DEFAULT_CONFIG = {
 # ============================================
 
 # Global config (modified by settings dialog)
-_config = DEFAULT_CONFIG.copy()
+_config = copy.deepcopy(DEFAULT_CONFIG)
 
 
 def get_resolve():
@@ -36,19 +38,33 @@ def get_fusion():
 
 
 def tc_to_frames(timecode, fps):
+    """Convert timecode string to frame number."""
+    if not fps or fps <= 0:
+        return None
     parts = timecode.replace(';', ':').split(':')
     if len(parts) != 4:
         return None
-    h, m, s, f = map(int, parts)
-    return int(((h * 3600 + m * 60 + s) * fps) + f)
+    try:
+        h, m, s, f = map(int, parts)
+    except ValueError:
+        return None
+    # Use rounded fps for frame calculation to match NLE behavior
+    fps_int = int(round(fps))
+    return int(((h * 3600 + m * 60 + s) * fps_int) + f)
 
 
 def frames_to_tc(frames, fps):
-    fps = int(round(fps))
-    f = frames % fps
-    s = (frames // fps) % 60
-    m = (frames // (fps * 60)) % 60
-    h = frames // (fps * 3600)
+    """Convert frame number to timecode string."""
+    if not fps or fps <= 0:
+        return "00:00:00:00"
+    # Use rounded fps for display to match NLE behavior
+    fps_int = int(round(fps))
+    if fps_int <= 0:
+        return "00:00:00:00"
+    f = frames % fps_int
+    s = (frames // fps_int) % 60
+    m = (frames // (fps_int * 60)) % 60
+    h = frames // (fps_int * 3600)
     return "{:02d}:{:02d}:{:02d}:{:02d}".format(h, m, s, f)
 
 
@@ -138,7 +154,8 @@ def show_settings_dialog(bins, fusion):
         combo.AddItem("{} ({} clips)".format(b['name'], b['clip_count']))
         if b['name'].upper() == 'TRACKS':
             default_idx = i
-    combo.CurrentIndex = default_idx
+    if bins:  # Only set index if there are items
+        combo.CurrentIndex = default_idx
 
     def on_start(ev):
         _config['video_track_index'] = win.Find('VideoTrack').Value
@@ -242,6 +259,11 @@ def main():
             print("Could not auto-detect multitrack bin.")
             print("Please rename your multitrack bin to 'TRACKS' and run again.")
             return
+
+    # Validate selected index is in range
+    if selected_idx >= len(all_bins):
+        print("ERROR: Invalid bin selection")
+        return
 
     multitrack_bin = all_bins[selected_idx]['folder']
     print("Selected bin: {}".format(multitrack_bin.GetName()))
@@ -358,8 +380,17 @@ def main():
 
     video_track_index = _config['video_track_index']
 
-    while timeline.GetTrackCount("video") < video_track_index:
-        timeline.AddTrack("video")
+    # Ensure we have enough video tracks
+    current_track_count = timeline.GetTrackCount("video")
+    while current_track_count < video_track_index:
+        if not timeline.AddTrack("video"):
+            print("WARNING: Could not add video track")
+            break
+        new_count = timeline.GetTrackCount("video")
+        if new_count == current_track_count:
+            print("WARNING: Track count did not increase after AddTrack")
+            break
+        current_track_count = new_count
 
     clips_to_add.sort(key=lambda x: x['timeline_start'])
 

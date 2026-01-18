@@ -17,6 +17,7 @@
 # - Offline media
 # - Clips at end of source media
 
+import copy
 import json
 import os
 
@@ -34,21 +35,11 @@ DEFAULT_CONFIG = {
     'check_disabled_clips': True,  # Report disabled clips on video tracks
 }
 
-# Config file path (user's home directory since __file__ not available in Resolve)
-def get_config_path():
-    """Get config file path - works in Resolve environment"""
-    try:
-        # Try script directory first
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(script_dir, "timeline_qc_config.json")
-    except NameError:
-        # __file__ not defined in Resolve - use home directory
-        return os.path.join(os.path.expanduser("~"), ".timeline_qc_config.json")
-
-CONFIG_FILE = get_config_path()
+# Config file path - always use home directory for reliability
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".timeline_qc_config.json")
 
 # Global state
-_config = DEFAULT_CONFIG.copy()
+_config = copy.deepcopy(DEFAULT_CONFIG)
 _resolve = None
 _fusion = None
 _ui = None
@@ -59,6 +50,33 @@ _timeline = None
 _fps = 24.0
 
 
+def validate_config(config):
+    """Validate and sanitize config values, return cleaned config."""
+    validated = copy.deepcopy(DEFAULT_CONFIG)
+
+    # Validate integer values
+    if isinstance(config.get('flash_frame_threshold'), (int, float)):
+        validated['flash_frame_threshold'] = max(1, int(config['flash_frame_threshold']))
+
+    if isinstance(config.get('min_audio_gap_frames'), (int, float)):
+        validated['min_audio_gap_frames'] = max(1, int(config['min_audio_gap_frames']))
+
+    # Validate boolean values
+    for bool_key in ['check_audio_gaps', 'ignore_adjustment_clips', 'check_offline_media',
+                     'check_source_end', 'check_audio_overlap', 'check_disabled_clips']:
+        if bool_key in config and isinstance(config[bool_key], bool):
+            validated[bool_key] = config[bool_key]
+
+    # Validate list values
+    if isinstance(config.get('ignore_track_names'), list):
+        validated['ignore_track_names'] = [str(x) for x in config['ignore_track_names'] if x]
+
+    if isinstance(config.get('ignore_prefixes'), list):
+        validated['ignore_prefixes'] = [str(x) for x in config['ignore_prefixes'] if x]
+
+    return validated
+
+
 def load_config():
     """Load configuration from file"""
     global _config
@@ -66,11 +84,19 @@ def load_config():
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 saved = json.load(f)
-                _config = DEFAULT_CONFIG.copy()
-                _config.update(saved)
+                if isinstance(saved, dict):
+                    _config = validate_config(saved)
+                else:
+                    print("Invalid config format, using defaults")
+                    _config = copy.deepcopy(DEFAULT_CONFIG)
+        else:
+            _config = copy.deepcopy(DEFAULT_CONFIG)
+    except json.JSONDecodeError as e:
+        print("Config file is malformed: {}".format(e))
+        _config = copy.deepcopy(DEFAULT_CONFIG)
     except Exception as e:
         print("Could not load config: {}".format(e))
-        _config = DEFAULT_CONFIG.copy()
+        _config = copy.deepcopy(DEFAULT_CONFIG)
 
 
 def save_config():
@@ -115,13 +141,19 @@ def get_fusion():
 
 
 def frames_to_tc(frames, fps):
-    fps = int(round(fps))
+    """Convert frame number to timecode string."""
+    if not fps or fps <= 0:
+        return "00:00:00:00"
+    # Use rounded fps for display to match NLE behavior
+    fps_int = int(round(fps))
+    if fps_int <= 0:
+        return "00:00:00:00"
     if frames < 0:
         frames = 0
-    f = frames % fps
-    s = (frames // fps) % 60
-    m = (frames // (fps * 60)) % 60
-    h = frames // (fps * 3600)
+    f = frames % fps_int
+    s = (frames // fps_int) % 60
+    m = (frames // (fps_int * 60)) % 60
+    h = frames // (fps_int * 3600)
     return "{:02d}:{:02d}:{:02d}:{:02d}".format(h, m, s, f)
 
 
@@ -137,6 +169,7 @@ def is_adjustment_clip(item):
         if name and "Adjustment Clip" in name:
             return True
     except (AttributeError, RuntimeError):
+        # Can't determine - assume not adjustment clip to avoid skipping real clips
         pass
     return False
 
@@ -482,8 +515,9 @@ def check_disabled_clips(timeline, fps):
                             'message': 'Disabled clip on V{}: "{}"'.format(
                                 track_idx, item.GetName())
                         })
-                except (AttributeError, RuntimeError):
-                    pass
+                except (AttributeError, RuntimeError) as e:
+                    # Log but continue
+                    print("Warning: Could not check enabled status for clip on V{}: {}".format(track_idx, e))
 
     # Always check for muted audio tracks
     audio_track_count = timeline.GetTrackCount("audio")
@@ -500,8 +534,9 @@ def check_disabled_clips(timeline, fps):
                     'track': 'A{}'.format(track_idx),
                     'message': 'Audio track A{} is muted/disabled'.format(track_idx)
                 })
-        except (AttributeError, RuntimeError):
-            pass
+        except (AttributeError, RuntimeError) as e:
+            # Log but continue
+            print("Warning: Could not check mute status for A{}: {}".format(track_idx, e))
 
     return issues
 
@@ -544,8 +579,9 @@ def check_offline_media(timeline, fps):
                             'message': 'Offline media on V{}: "{}"'.format(
                                 track_idx, item.GetName())
                         })
-            except (AttributeError, RuntimeError):
-                pass
+            except (AttributeError, RuntimeError) as e:
+                # Log but continue - don't let one clip error stop the whole check
+                print("Warning: Could not check offline status for clip on V{}: {}".format(track_idx, e))
 
     return issues
 
@@ -570,9 +606,12 @@ def check_source_end(timeline, fps):
                 if media_pool_item:
                     clip_props = media_pool_item.GetClipProperty()
                     if clip_props:
-                        source_frames = clip_props.get('Frames')
-                        if source_frames:
-                            source_frames = int(source_frames)
+                        source_frames_raw = clip_props.get('Frames')
+                        if source_frames_raw:
+                            try:
+                                source_frames = int(source_frames_raw)
+                            except (ValueError, TypeError):
+                                continue  # Skip if frames is not a valid number
                             right_offset = item.GetRightOffset()
                             if right_offset is not None and right_offset <= 2:
                                 issues.append({
@@ -586,8 +625,9 @@ def check_source_end(timeline, fps):
                                     'message': 'Clip at source end on V{}: "{}" (right offset: {} frames)'.format(
                                         track_idx, item.GetName(), right_offset)
                                 })
-            except (AttributeError, RuntimeError):
-                pass
+            except (AttributeError, RuntimeError) as e:
+                # Log but continue - don't let one clip error stop the whole check
+                print("Warning: Could not check source end for clip on V{}: {}".format(track_idx, e))
 
     return issues
 
@@ -596,7 +636,18 @@ def run_qc_analysis(timeline, progress_callback=None):
     """Run all QC checks and return issues"""
     global _fps
 
-    _fps = float(timeline.GetSetting("timelineFrameRate"))
+    try:
+        _fps = float(timeline.GetSetting("timelineFrameRate"))
+    except (ValueError, TypeError):
+        _fps = 24.0  # Fallback to common default
+        if progress_callback:
+            progress_callback("Warning: Could not get frame rate, using 24 fps")
+
+    if _fps <= 0:
+        _fps = 24.0
+        if progress_callback:
+            progress_callback("Warning: Invalid frame rate, using 24 fps")
+
     timeline_start = timeline.GetStartFrame()
     timeline_end = timeline.GetEndFrame()
 
@@ -1090,7 +1141,16 @@ def show_results_window(issues, timeline):
         save_win.Hide()
 
         if save_result['path']:
-            report_path = save_result['path']
+            report_path = save_result['path'].strip()
+
+            # Basic path validation
+            if not report_path:
+                print("Error: Empty path specified")
+                return
+
+            # Normalize path separators
+            report_path = os.path.normpath(report_path)
+
             # Ensure .txt extension
             if not report_path.lower().endswith('.txt'):
                 report_path += '.txt'
@@ -1107,6 +1167,10 @@ def show_results_window(issues, timeline):
                 print("Report saved to:")
                 print(report_path)
                 print("=" * 50)
+            except PermissionError:
+                print("Error: Permission denied writing to: {}".format(report_path))
+            except OSError as e:
+                print("Error: Could not save report - {}".format(e))
             except Exception as e:
                 print("Could not save report: {}".format(e))
         else:
