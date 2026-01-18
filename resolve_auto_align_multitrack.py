@@ -12,13 +12,12 @@ import copy
 DEFAULT_CONFIG = {
     'video_track_index': 1,
     'ignore_prefixes': ["Sample", "Fade"],
+    'copy_audio': True,
+    'audio_tracks_count': 2,
+    'audio_start_track': 2,
+    'create_new_timeline': True,
 }
 # ============================================
-
-# NOTE: Audio copying feature was attempted but the Resolve scripting API
-# cannot place audio from Multicam clips. The API's mediaType=2 parameter
-# returns success but doesn't actually place audio clips on the timeline.
-# This is a known limitation of the DaVinci Resolve scripting API.
 
 # Global config (modified by settings dialog)
 _config = copy.deepcopy(DEFAULT_CONFIG)
@@ -114,6 +113,100 @@ def should_skip_clip(clip_name):
     return False
 
 
+def create_new_timeline_from_aaf(project, media_pool, aaf_timeline):
+    """Create a new timeline with same settings as AAF timeline."""
+    aaf_name = aaf_timeline.GetName()
+    new_name = aaf_name + "_MULTITRACK"
+
+    # Get AAF timeline settings
+    fps = aaf_timeline.GetSetting("timelineFrameRate")
+    start_tc = aaf_timeline.GetStartTimecode()
+
+    # Create new timeline
+    new_timeline = media_pool.CreateEmptyTimeline(new_name)
+    if not new_timeline:
+        print("ERROR: Could not create new timeline")
+        return None
+
+    # Apply settings
+    new_timeline.SetSetting("timelineFrameRate", fps)
+    if start_tc:
+        new_timeline.SetStartTimecode(start_tc)
+
+    print("Created new timeline: {}".format(new_name))
+    print("  Frame rate: {} fps".format(fps))
+    print("  Start TC: {}".format(start_tc))
+
+    return new_timeline
+
+
+def copy_audio_from_aaf(aaf_timeline, new_timeline, media_pool, fps):
+    """Copy audio clips from AAF timeline to new timeline."""
+    print("")
+    print("Copying audio from AAF timeline...")
+
+    audio_track_count = aaf_timeline.GetTrackCount("audio")
+    print("AAF has {} audio tracks".format(audio_track_count))
+
+    # Ensure new timeline has enough audio tracks
+    new_audio_count = new_timeline.GetTrackCount("audio")
+    while new_audio_count < audio_track_count:
+        new_timeline.AddTrack("audio")
+        new_count = new_timeline.GetTrackCount("audio")
+        if new_count == new_audio_count:
+            break
+        new_audio_count = new_count
+
+    copied_count = 0
+
+    for track_idx in range(1, audio_track_count + 1):
+        items = aaf_timeline.GetItemListInTrack("audio", track_idx)
+        if not items:
+            continue
+
+        for item in items:
+            clip_name = item.GetName()
+            if should_skip_clip(clip_name):
+                continue
+
+            media_pool_item = item.GetMediaPoolItem()
+            if not media_pool_item:
+                continue
+
+            # Get clip placement info
+            start_frame = item.GetStart()
+            duration = item.GetDuration()
+            left_offset = item.GetLeftOffset()
+
+            clip_info = {
+                "mediaPoolItem": media_pool_item,
+                "startFrame": left_offset,
+                "endFrame": left_offset + duration,
+                "trackIndex": track_idx,
+                "recordFrame": start_frame,
+            }
+
+            result = media_pool.AppendToTimeline([clip_info])
+            if result:
+                copied_count += 1
+
+    print("Copied {} audio clips".format(copied_count))
+    return copied_count
+
+
+def ensure_audio_tracks(timeline, required_count):
+    """Ensure timeline has at least required_count audio tracks."""
+    current = timeline.GetTrackCount("audio")
+    while current < required_count:
+        if not timeline.AddTrack("audio"):
+            return False
+        new_count = timeline.GetTrackCount("audio")
+        if new_count == current:
+            return False
+        current = new_count
+    return True
+
+
 def show_settings_dialog(bins, fusion):
     """Show settings dialog with bin selection using Fusion UI"""
     global _config
@@ -126,7 +219,7 @@ def show_settings_dialog(bins, fusion):
     win = disp.AddWindow({
         'ID': 'SettingsWin',
         'WindowTitle': 'Auto Align Multitrack - Settings',
-        'Geometry': [300, 200, 450, 220],
+        'Geometry': [300, 200, 450, 380],
         'Spacing': 10,
     }, [
         ui.VGroup({'Spacing': 5}, [
@@ -144,6 +237,22 @@ def show_settings_dialog(bins, fusion):
             ui.HGroup({'Weight': 0}, [
                 ui.Label({'Text': 'Multitrack bin:', 'Weight': 1}),
                 ui.ComboBox({'ID': 'BinCombo', 'Weight': 3}),
+            ]),
+            ui.Label({'Text': '-' * 50, 'Weight': 0}),
+            ui.Label({'Text': 'Audio Options:', 'Font': ui.Font({'Bold': True}), 'Weight': 0}),
+            ui.HGroup({'Weight': 0}, [
+                ui.CheckBox({'ID': 'CreateNewTimeline', 'Text': 'Create new timeline (copy AAF audio)', 'Checked': _config.get('create_new_timeline', True), 'Weight': 1}),
+            ]),
+            ui.HGroup({'Weight': 0}, [
+                ui.CheckBox({'ID': 'CopyAudio', 'Text': 'Copy audio from multitrack', 'Checked': _config.get('copy_audio', True), 'Weight': 1}),
+            ]),
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Audio tracks to copy:', 'Weight': 2}),
+                ui.SpinBox({'ID': 'AudioTracksCount', 'Value': _config.get('audio_tracks_count', 2), 'Minimum': 1, 'Maximum': 16, 'Weight': 1}),
+            ]),
+            ui.HGroup({'Weight': 0}, [
+                ui.Label({'Text': 'Place on audio track:', 'Weight': 2}),
+                ui.SpinBox({'ID': 'AudioStartTrack', 'Value': _config.get('audio_start_track', 2), 'Minimum': 1, 'Maximum': 24, 'Weight': 1}),
             ]),
             ui.Label({'Text': '', 'Weight': 1}),
             ui.HGroup({'Weight': 0}, [
@@ -166,6 +275,10 @@ def show_settings_dialog(bins, fusion):
         _config['video_track_index'] = win.Find('VideoTrack').Value
         prefixes_text = win.Find('IgnorePrefixes').Text
         _config['ignore_prefixes'] = [p.strip() for p in prefixes_text.split(',') if p.strip()]
+        _config['create_new_timeline'] = win.Find('CreateNewTimeline').Checked
+        _config['copy_audio'] = win.Find('CopyAudio').Checked
+        _config['audio_tracks_count'] = win.Find('AudioTracksCount').Value
+        _config['audio_start_track'] = win.Find('AudioStartTrack').Value
         result['bin_idx'] = win.Find('BinCombo').CurrentIndex
         result['cancelled'] = False
         disp.ExitLoop()
@@ -383,30 +496,69 @@ def main():
         print("No clips to place.")
         return
 
+    # Get config values
     video_track_index = _config['video_track_index']
+    create_new_timeline = _config.get('create_new_timeline', False)
+    copy_audio = _config.get('copy_audio', False)
+    audio_tracks_count = _config.get('audio_tracks_count', 2)
+    audio_start_track = _config.get('audio_start_track', 2)
+
+    # Store reference to AAF timeline
+    aaf_timeline = timeline
+    target_timeline = timeline
+
+    # Create new timeline if requested
+    if create_new_timeline:
+        print("")
+        print("-" * 60)
+        new_timeline = create_new_timeline_from_aaf(project, media_pool, aaf_timeline)
+        if not new_timeline:
+            print("ERROR: Failed to create new timeline, aborting")
+            return
+
+        # Switch to new timeline
+        project.SetCurrentTimeline(new_timeline)
+        target_timeline = new_timeline
+
+        # Copy audio from AAF
+        copy_audio_from_aaf(aaf_timeline, new_timeline, media_pool, fps)
+        print("-" * 60)
 
     # Ensure we have enough video tracks
-    current_track_count = timeline.GetTrackCount("video")
+    current_track_count = target_timeline.GetTrackCount("video")
     while current_track_count < video_track_index:
-        if not timeline.AddTrack("video"):
+        if not target_timeline.AddTrack("video"):
             print("WARNING: Could not add video track")
             break
-        new_count = timeline.GetTrackCount("video")
+        new_count = target_timeline.GetTrackCount("video")
         if new_count == current_track_count:
             print("WARNING: Track count did not increase after AddTrack")
             break
         current_track_count = new_count
 
+    # Ensure we have enough audio tracks if copying audio
+    if copy_audio:
+        required_audio_track = audio_start_track + audio_tracks_count - 1
+        if not ensure_audio_tracks(target_timeline, required_audio_track):
+            print("WARNING: Could not create all required audio tracks")
+
     clips_to_add.sort(key=lambda x: x['timeline_start'])
 
     print("")
-    print("Placing {} clips on V{}...".format(len(clips_to_add), video_track_index))
+    if copy_audio:
+        print("Placing {} clips on V{} with {} audio tracks starting at A{}...".format(
+            len(clips_to_add), video_track_index, audio_tracks_count, audio_start_track))
+    else:
+        print("Placing {} clips on V{}...".format(len(clips_to_add), video_track_index))
+
     placed_count = 0
+    audio_placed_count = 0
 
     for clip_info in clips_to_add:
         mc = clip_info['multitrack_clip']
         target_tc = frames_to_tc(clip_info['timeline_start'], fps)
 
+        # Place video
         video_clip_info = {
             "mediaPoolItem": mc,
             "startFrame": clip_info['offset'],
@@ -421,12 +573,33 @@ def main():
         if result:
             placed_count += 1
             print("  Placed: {} @ {}".format(clip_info['multitrack_name'], target_tc))
+
+            # Place audio tracks if enabled
+            if copy_audio:
+                for audio_offset in range(audio_tracks_count):
+                    audio_track = audio_start_track + audio_offset
+                    audio_clip_info = {
+                        "mediaPoolItem": mc,
+                        "startFrame": clip_info['offset'],
+                        "endFrame": clip_info['offset'] + clip_info['duration'],
+                        "mediaType": 2,
+                        "trackIndex": audio_track,
+                        "recordFrame": clip_info['timeline_start'],
+                    }
+                    audio_result = media_pool.AppendToTimeline([audio_clip_info])
+                    if audio_result:
+                        audio_placed_count += 1
         else:
             print("  FAILED: {}".format(clip_info['name']))
 
     print("")
     print("=" * 60)
-    print("  DONE! Placed {}/{} clips".format(placed_count, len(clips_to_add)))
+    print("  DONE! Placed {}/{} video clips".format(placed_count, len(clips_to_add)))
+    if copy_audio:
+        expected_audio = placed_count * audio_tracks_count
+        print("  Audio clips placed: {}/{}".format(audio_placed_count, expected_audio))
+    if create_new_timeline:
+        print("  New timeline: {}".format(target_timeline.GetName()))
     print("=" * 60)
     print("")
 
