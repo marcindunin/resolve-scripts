@@ -14,24 +14,16 @@ Automatically aligns multitrack video clips to an AAF timeline based on matching
 
 1. Reads audio clips from track 1 of the current timeline (your imported AAF)
 2. Matches each audio clip's source timecode to multitrack clips in a selected bin
-3. Places the matching video clips on V1 at the correct timeline positions
+3. Optionally creates a new timeline and copies AAF audio to it
+4. Places the matching video clips at the correct timeline positions
 
-#### Installation
+#### Features
 
-**macOS:**
-```
-~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/
-```
-
-**Windows:**
-```
-%APPDATA%\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\Utility\
-```
-
-**Linux:**
-```
-~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/
-```
+- **GUI settings dialog** with all configurable options
+- **New timeline creation** - Creates a working timeline from AAF with copied audio
+- **Customizable timeline suffix** - Default `_montaz`, editable in settings
+- **Ignore prefixes** - Skip clips starting with specified prefixes (e.g., "Sample", "Fade")
+- **Bin auto-detection** - Automatically finds bin named "TRACKS" if no GUI available
 
 #### Usage
 
@@ -39,17 +31,26 @@ Automatically aligns multitrack video clips to an AAF timeline based on matching
 2. Import your multitrack video clips into a bin (e.g., named "TRACKS")
 3. Open the AAF timeline
 4. Run the script from: **Workspace > Scripts > resolve_auto_align_multitrack**
-5. Select the bin containing your multitrack clips from the dropdown dialog
-6. The script will match and place clips automatically
+5. Configure settings in the dialog:
+   - **Target video track** - Which video track to place clips on
+   - **Ignore prefixes** - Comma-separated list of prefixes to skip
+   - **Multitrack bin** - Select the bin containing your multitrack clips
+   - **Create new timeline** - Creates `[AAF_name]_montaz` with copied audio
+   - **Timeline name suffix** - Customize the new timeline suffix
+6. Click **Start** - the script will match and place clips automatically
 
-#### Configuration
+#### Settings
 
-Edit the top of the script to customize:
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Target video track | Video track index for placed clips | 1 |
+| Ignore prefixes | Skip clips starting with these (comma-separated) | Sample, Fade |
+| Create new timeline | Create new timeline and copy AAF audio | On |
+| Timeline name suffix | Suffix for new timeline name | _montaz |
 
-```python
-VIDEO_TRACK_INDEX = 1          # Target video track for placed clips
-IGNORE_PREFIXES = ["Sample", "Fade"]  # Skip clips starting with these prefixes
-```
+#### Known limitations
+
+- **Multicam audio** - The Resolve scripting API cannot place audio from Multicam clips. Video is placed correctly, but audio must be added manually by dragging clips or using "Link Clips" feature. This is a fundamental limitation of the Resolve API, not the script.
 
 #### Requirements
 
