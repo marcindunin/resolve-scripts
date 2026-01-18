@@ -15,6 +15,11 @@ DEFAULT_CONFIG = {
 }
 # ============================================
 
+# NOTE: Audio copying feature was attempted but the Resolve scripting API
+# cannot place audio from Multicam clips. The API's mediaType=2 parameter
+# returns success but doesn't actually place audio clips on the timeline.
+# This is a known limitation of the DaVinci Resolve scripting API.
+
 # Global config (modified by settings dialog)
 _config = copy.deepcopy(DEFAULT_CONFIG)
 
