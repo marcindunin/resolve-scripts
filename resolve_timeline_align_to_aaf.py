@@ -153,7 +153,6 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
     Returns (placed, failed).
     """
     tl = src_data['timeline']
-    src_tc_start = src_data['tc_start']
     placed = 0
     failed = 0
 
@@ -170,9 +169,11 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
             if not media_item:
                 continue
 
-            # Absolute TC of this clip = timeline Start TC + its position in the timeline
-            item_tc_in = src_tc_start + item.GetStart()
-            item_tc_out = src_tc_start + item.GetEnd()
+            # item.GetStart() / GetEnd() return absolute TC frame numbers
+            # (they include the timeline's Start TC offset), so use them directly
+            # without adding src_tc_start — that would double-count the offset.
+            item_tc_in = item.GetStart()
+            item_tc_out = item.GetEnd()
 
             # Intersection with requested TC range
             overlap_in = max(item_tc_in, tc_in)
@@ -217,7 +218,6 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
     Returns number of markers copied.
     """
     tl = src_data['timeline']
-    src_tc_start = src_data['tc_start']
 
     markers = tl.GetMarkers()
     if not markers:
@@ -225,7 +225,8 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
 
     copied = 0
     for frame_pos, data in markers.items():
-        marker_tc = src_tc_start + frame_pos
+        # frame_pos from GetMarkers() is absolute (same coordinate as GetStart())
+        marker_tc = frame_pos
         if not (tc_in <= marker_tc < tc_out):
             continue
 
