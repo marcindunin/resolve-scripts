@@ -200,15 +200,6 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
 
             result = media_pool.AppendToTimeline([clip_info])
             if result:
-                # Preserve active multicam angle from source clip
-                try:
-                    angle = item.GetActiveCameraNumber()
-                    if angle and angle > 0:
-                        ok = result[0].SetActiveCameraNumber(angle)
-                        print("    CAM: {} -> angle {} set={}".format(
-                            item.GetName(), angle, ok))
-                except Exception as e:
-                    print("    CAM ERR: {}".format(e))
                 placed += 1
                 track_placed += 1
             else:
