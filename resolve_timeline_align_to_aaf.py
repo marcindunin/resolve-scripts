@@ -198,7 +198,15 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
                 "recordFrame": record_frame,
             }
 
-            if media_pool.AppendToTimeline([clip_info]):
+            result = media_pool.AppendToTimeline([clip_info])
+            if result:
+                # Preserve active multicam angle from source clip
+                try:
+                    angle = item.GetActiveCameraNumber()
+                    if angle and angle > 0:
+                        result[0].SetActiveCameraNumber(angle)
+                except Exception:
+                    pass
                 placed += 1
                 track_placed += 1
             else:
@@ -218,6 +226,7 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
     Returns number of markers copied.
     """
     tl = src_data['timeline']
+    src_tc_start = src_data['tc_start']
 
     markers = tl.GetMarkers()
     if not markers:
@@ -225,8 +234,9 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
 
     copied = 0
     for frame_pos, data in markers.items():
-        # frame_pos from GetMarkers() is absolute (same coordinate as GetStart())
-        marker_tc = frame_pos
+        # frame_pos from GetMarkers() is relative to timeline start (0-based),
+        # unlike item.GetStart() which returns absolute TC frames.
+        marker_tc = src_tc_start + frame_pos
         if not (tc_in <= marker_tc < tc_out):
             continue
 
