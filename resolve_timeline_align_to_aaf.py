@@ -527,6 +527,11 @@ def main():
     total_markers = 0
     no_match_count = 0
 
+    # AAF places clips at their source TC position, so timeline position
+    # directly encodes source TC — no MediaPoolItem needed.
+    # This also works for offline (red) clips whose media files are missing.
+    aaf_tc_start = tc_to_frames(aaf_timeline.GetStartTimecode() or "00:00:00:00", fps) or 0
+
     for audio_item in audio_items:
         clip_name = audio_item.GetName()
 
@@ -534,25 +539,12 @@ def main():
             print("SKIP  : {}".format(clip_name))
             continue
 
-        mpi = audio_item.GetMediaPoolItem()
-        if not mpi:
-            continue
-
-        clip_start_tc_str = mpi.GetClipProperty("Start TC")
-        if not clip_start_tc_str:
-            print("NO TC : {}".format(clip_name))
-            continue
-
-        clip_start_frames = tc_to_frames(clip_start_tc_str, fps)
-        if clip_start_frames is None:
-            continue
-
-        left_offset = audio_item.GetLeftOffset()
-        duration = audio_item.GetDuration()
         record_start = audio_item.GetStart()
+        duration = audio_item.GetDuration()
 
-        # TC range covered by this audio clip in the source material
-        tc_in = clip_start_frames + left_offset
+        # Source TC of clip's in-point = AAF start TC + record position in timeline.
+        # Works for both online and offline clips.
+        tc_in = aaf_tc_start + record_start
         tc_out = tc_in + duration
 
         src = find_source_timeline(tc_in, source_timelines)
