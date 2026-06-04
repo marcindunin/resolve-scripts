@@ -204,9 +204,11 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
                 try:
                     angle = item.GetActiveCameraNumber()
                     if angle and angle > 0:
-                        result[0].SetActiveCameraNumber(angle)
-                except Exception:
-                    pass
+                        ok = result[0].SetActiveCameraNumber(angle)
+                        print("    CAM: {} -> angle {} set={}".format(
+                            item.GetName(), angle, ok))
+                except Exception as e:
+                    print("    CAM ERR: {}".format(e))
                 placed += 1
                 track_placed += 1
             else:
