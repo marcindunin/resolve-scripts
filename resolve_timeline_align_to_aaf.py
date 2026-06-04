@@ -87,38 +87,6 @@ def get_all_bins(folder, bins_list, path=""):
         get_all_bins(sub, bins_list, current_path)
 
 
-def get_timeline_tc_offset(tl, fps):
-    """
-    Returns the absolute TC frame corresponding to timeline frame position 0.
-    Derived from clip media TC to avoid relying on GetStartTimecode(), which
-    can return an incorrect value in some Resolve versions.
-    Falls back to GetStartTimecode() if no clips are found.
-    """
-    track_count = tl.GetTrackCount("video")
-    for track_idx in range(1, track_count + 1):
-        items = tl.GetItemListInTrack("video", track_idx)
-        if not items:
-            continue
-        for item in items:
-            mpi = item.GetMediaPoolItem()
-            if not mpi:
-                continue
-            tc_str = mpi.GetClipProperty("Start TC")
-            if not tc_str:
-                continue
-            media_tc = tc_to_frames(tc_str, fps)
-            if media_tc is None:
-                continue
-            # TC at in-point of this clip = media_tc + left_offset
-            # Timeline position of in-point = item.GetStart()
-            # => TC at position 0 = (media_tc + left_offset) - item.GetStart()
-            return media_tc + item.GetLeftOffset() - item.GetStart()
-
-    # Fallback: trust GetStartTimecode()
-    tc = tc_to_frames(tl.GetStartTimecode() or "", fps)
-    return tc if tc is not None else 0
-
-
 def load_source_timelines(bin_folder, project, fps):
     """Match timeline items in bin to Timeline objects from the project."""
     clips = bin_folder.GetClipList()
@@ -142,23 +110,27 @@ def load_source_timelines(bin_folder, project, fps):
         if not tl or tl.GetName() not in tl_names:
             continue
 
-        tc_offset = get_timeline_tc_offset(tl, fps)
+        # GetStartTimecode() gives the absolute TC of the timeline's first frame.
+        # Clips inside the timeline may have relative TC (starting at 00:00:00:00),
+        # so we must use the timeline's Start TC — not clip media TC — for positioning.
+        start_tc_str = tl.GetStartTimecode() or "00:00:00:00"
+        tc_start = tc_to_frames(start_tc_str, fps)
+        if tc_start is None:
+            tc_start = 0
+
         duration = tl.GetEndFrame() - tl.GetStartFrame()
-        tc_start = tc_offset
-        tc_end = tc_offset + duration
+        tc_end = tc_start + duration
 
         result.append({
             'timeline': tl,
             'name': tl.GetName(),
             'tc_start': tc_start,
             'tc_end': tc_end,
-            'tc_offset': tc_offset,
         })
-        print("  {} | {} - {} (GetStartTimecode: {})".format(
+        print("  {} | {} - {}".format(
             tl.GetName(),
             frames_to_tc(tc_start, fps),
             frames_to_tc(tc_end, fps),
-            tl.GetStartTimecode(),
         ))
 
     return result
@@ -175,11 +147,13 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
                             media_pool, fps, num_tracks):
     """
     Copy video clips from src_data timeline where source TC overlaps [tc_in, tc_out).
-    TC of each clip is derived from its media item TC — independent of timeline Start TC.
+    Clip TC = timeline Start TC + item.GetStart() — correct for multitrack clips
+    whose media has relative TC (starting at 00:00:00:00).
     record_start: destination frame (0-based from dest timeline start) where tc_in lands.
     Returns (placed, failed).
     """
     tl = src_data['timeline']
+    src_tc_start = src_data['tc_start']
     placed = 0
     failed = 0
 
@@ -196,17 +170,9 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
             if not media_item:
                 continue
 
-            # Derive clip TC directly from media — no dependency on timeline Start TC
-            media_tc_str = media_item.GetClipProperty("Start TC")
-            if not media_tc_str:
-                continue
-            media_tc = tc_to_frames(media_tc_str, fps)
-            if media_tc is None:
-                continue
-
-            left_offset = item.GetLeftOffset()
-            item_tc_in = media_tc + left_offset
-            item_tc_out = item_tc_in + item.GetDuration()
+            # Absolute TC of this clip = timeline Start TC + its position in the timeline
+            item_tc_in = src_tc_start + item.GetStart()
+            item_tc_out = src_tc_start + item.GetEnd()
 
             # Intersection with requested TC range
             overlap_in = max(item_tc_in, tc_in)
@@ -215,6 +181,7 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
                 continue
 
             # Source in/out within the media file
+            left_offset = item.GetLeftOffset()
             src_in = left_offset + (overlap_in - item_tc_in)
             src_out = src_in + (overlap_out - overlap_in)
 
@@ -250,7 +217,7 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
     Returns number of markers copied.
     """
     tl = src_data['timeline']
-    tc_offset = src_data['tc_offset']
+    src_tc_start = src_data['tc_start']
 
     markers = tl.GetMarkers()
     if not markers:
@@ -258,7 +225,7 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
 
     copied = 0
     for frame_pos, data in markers.items():
-        marker_tc = tc_offset + frame_pos
+        marker_tc = src_tc_start + frame_pos
         if not (tc_in <= marker_tc < tc_out):
             continue
 
