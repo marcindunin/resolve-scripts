@@ -527,11 +527,6 @@ def main():
     total_markers = 0
     no_match_count = 0
 
-    # AAF places clips at their source TC position, so timeline position
-    # directly encodes source TC — no MediaPoolItem needed.
-    # This also works for offline (red) clips whose media files are missing.
-    aaf_tc_start = tc_to_frames(aaf_timeline.GetStartTimecode() or "00:00:00:00", fps) or 0
-
     for audio_item in audio_items:
         clip_name = audio_item.GetName()
 
@@ -539,12 +534,28 @@ def main():
             print("SKIP  : {}".format(clip_name))
             continue
 
+        # Read source TC from the clip — works even for offline (red) clips
+        # because Resolve stores TC metadata in the project database.
+        # Try MediaPoolItem first, then fall back to TimelineItem.GetClipProperty.
+        tc_str = None
+        mpi = audio_item.GetMediaPoolItem()
+        if mpi:
+            tc_str = mpi.GetClipProperty("Start TC")
+        if not tc_str:
+            tc_str = audio_item.GetClipProperty("Start TC")
+        if not tc_str:
+            print("NO TC : {}".format(clip_name))
+            continue
+
+        clip_start_frames = tc_to_frames(tc_str, fps)
+        if clip_start_frames is None:
+            continue
+
+        left_offset = audio_item.GetLeftOffset()
         record_start = audio_item.GetStart()
         duration = audio_item.GetDuration()
 
-        # Source TC of clip's in-point = AAF start TC + record position in timeline.
-        # Works for both online and offline clips.
-        tc_in = aaf_tc_start + record_start
+        tc_in = clip_start_frames + left_offset
         tc_out = tc_in + duration
 
         src = find_source_timeline(tc_in, source_timelines)
