@@ -241,7 +241,7 @@ def fix_multicam_angles_via_drt(dest_timeline, dest_camera_map, project,
     and reimporting the patched DRT.
     Returns the new Timeline object, or the original on error.
     """
-    to_fix = {k: v for k, v in dest_camera_map.items() if v != 1}
+    to_fix = dict(dest_camera_map)
     if not to_fix:
         return dest_timeline
 
@@ -251,22 +251,10 @@ def fix_multicam_angles_via_drt(dest_timeline, dest_camera_map, project,
     drt_fixed = os.path.join(temp_dir, safe + '_dest_fixed.drt')
 
     print("\nApplying multicam angles via DRT ({} clips to fix)...".format(len(to_fix)))
-    cam_counts = {}
-    for cam in to_fix.values():
-        cam_counts[cam] = cam_counts.get(cam, 0) + 1
-    print("  Camera distribution (non-cam1): {}".format(
-        ', '.join('cam{}:{}'.format(k, v) for k, v in sorted(cam_counts.items()))))
 
     if not dest_timeline.Export(drt_orig, resolve.EXPORT_DRT, resolve.EXPORT_NONE):
         print("  ERROR: DRT export of destination failed - angles not applied")
         return dest_timeline
-
-    # DEBUG: save dest DRT copy for inspection
-    import shutil, os as _os
-    _debug_dir = r'C:\temp\resolve_drt_debug'
-    _os.makedirs(_debug_dir, exist_ok=True)
-    shutil.copy2(drt_orig, _os.path.join(_debug_dir, 'dest_before_patch.drt'))
-    print("  [DBG] Dest DRT saved to: {}\\dest_before_patch.drt".format(_debug_dir))
 
     with zipfile.ZipFile(drt_orig, 'r') as z:
         file_data = {name: z.read(name) for name in z.namelist()}
@@ -380,8 +368,8 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
                 placed += 1
                 track_placed += 1
                 if source_angle_map is not None:
-                    cam = source_angle_map.get(item_tc_in, 1)
-                    if cam != 1:
+                    cam = source_angle_map.get(item_tc_in)
+                    if cam is not None:
                         angle_assignments[result[0].GetStart()] = cam
             else:
                 failed += 1
