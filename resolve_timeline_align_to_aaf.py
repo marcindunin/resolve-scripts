@@ -720,7 +720,9 @@ def main():
         if mpi:
             tc_str = mpi.GetClipProperty("Start TC")
         if not tc_str:
-            tc_str = audio_item.GetClipProperty("Start TC")
+            gcp = getattr(audio_item, 'GetClipProperty', None)
+            if callable(gcp):
+                tc_str = gcp("Start TC")
         if not tc_str:
             print("NO TC : {}".format(clip_name))
             continue
