@@ -176,6 +176,7 @@ def _parse_drt_camera_angles(drt_path):
         print("    DRT read error: {}".format(e))
         return result
 
+    debug_count = 0
     for clip_m in re.finditer(
             r'<Sm2TiVideoClip[^>]*>(.*?)</Sm2TiVideoClip>',
             xml_content, re.DOTALL):
@@ -185,12 +186,33 @@ def _parse_drt_camera_angles(drt_path):
             continue
         start_frame = int(start_m.group(1))
 
-        # Active angle lives in LmVersion; fall back to first matching blob
         lm_m = re.search(
             r'<ListMgt::LmVersion[^>]*>(.*?)</ListMgt::LmVersion>',
             block, re.DOTALL)
-        search_in = lm_m.group(1) if lm_m else block
 
+        # Collect camera patterns from every blob in the whole block
+        all_blobs = re.findall(r'<FieldsBlob>([0-9a-fA-F]+)</FieldsBlob>', block)
+        all_cams = []
+        for b in all_blobs:
+            cm = re.search(r'1a0843616d65726120(3[1-9])', b.lower())
+            all_cams.append(int(cm.group(1), 16) - 0x30 if cm else None)
+
+        # Camera from LmVersion blob specifically
+        lm_cam = None
+        if lm_m:
+            for b in re.findall(r'<FieldsBlob>([0-9a-fA-F]+)</FieldsBlob>', lm_m.group(1)):
+                cm = re.search(r'1a0843616d65726120(3[1-9])', b.lower())
+                if cm:
+                    lm_cam = int(cm.group(1), 16) - 0x30
+                    break
+
+        if debug_count < 15:
+            print("  [DRT DBG] start={} lmv={} blobs={} lmcam={}".format(
+                start_frame, bool(lm_m), all_cams, lm_cam))
+            debug_count += 1
+
+        # Use LmVersion if present, else first matching blob
+        search_in = lm_m.group(1) if lm_m else block
         for blob_m in re.finditer(r'<FieldsBlob>([0-9a-fA-F]+)</FieldsBlob>', search_in):
             blob = blob_m.group(1).lower()
             cam_m = re.search(r'1a0843616d65726120(3[1-9])', blob)
@@ -780,12 +802,14 @@ def main():
             project, media_pool, resolve, temp_dir,
         )
 
-    # Clean up temp files
-    try:
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    except Exception:
-        pass
+    # DEBUG: keep temp files for inspection
+    print("\n[DEBUG] Temp DRT files kept at: {}".format(temp_dir))
+    # (cleanup disabled for debugging - re-enable after investigation)
+    # try:
+    #     import shutil
+    #     shutil.rmtree(temp_dir, ignore_errors=True)
+    # except Exception:
+    #     pass
 
     print("")
     print("=" * 60)
