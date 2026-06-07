@@ -185,7 +185,13 @@ def _parse_drt_camera_angles(drt_path):
             continue
         start_frame = int(start_m.group(1))
 
-        for blob_m in re.finditer(r'<FieldsBlob>([0-9a-fA-F]+)</FieldsBlob>', block):
+        # Active angle lives in LmVersion; fall back to first matching blob
+        lm_m = re.search(
+            r'<ListMgt::LmVersion[^>]*>(.*?)</ListMgt::LmVersion>',
+            block, re.DOTALL)
+        search_in = lm_m.group(1) if lm_m else block
+
+        for blob_m in re.finditer(r'<FieldsBlob>([0-9a-fA-F]+)</FieldsBlob>', search_in):
             blob = blob_m.group(1).lower()
             cam_m = re.search(r'1a0843616d65726120(3[1-9])', blob)
             if cam_m:
