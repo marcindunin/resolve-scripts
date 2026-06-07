@@ -3,15 +3,19 @@
 # =============================================================
 # Reads audio clips from an AAF timeline, finds matching source timelines
 # in a bin (by timecode), copies the corresponding video clips to the
-# destination timeline at the correct record positions, and copies markers.
+# destination timeline at the correct record positions, copies markers,
+# and restores multicam active angles via DRT export/import.
 #
 # Requirements:
 #   - Open the AAF timeline (audio-only) as the current timeline
 #   - Place source timelines in a bin named "TRACKS" (or select via dialog)
-#   - TC offset is derived from clip media TC, so GetStartTimecode() does not
-#     need to be set correctly on the source timelines
+#   - TC offset is derived from clip media TC
 
 import copy
+import os
+import re
+import zipfile
+import tempfile
 
 DEFAULT_CONFIG = {
     'video_tracks_count': 1,
@@ -99,7 +103,6 @@ def load_source_timelines(bin_folder, project, fps):
             tl_names.add(item.GetName())
 
     if not tl_names:
-        # Fallback: treat all items in bin as potential timelines
         for item in clips:
             tl_names.add(item.GetName())
 
@@ -111,8 +114,6 @@ def load_source_timelines(bin_folder, project, fps):
             continue
 
         # GetStartTimecode() gives the absolute TC of the timeline's first frame.
-        # Clips inside the timeline may have relative TC (starting at 00:00:00:00),
-        # so we must use the timeline's Start TC — not clip media TC — for positioning.
         start_tc_str = tl.GetStartTimecode() or "00:00:00:00"
         tc_start = tc_to_frames(start_tc_str, fps)
         if tc_start is None:
@@ -143,18 +144,188 @@ def find_source_timeline(tc_frames, source_timelines):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Multicam angle restoration via DRT
+# ---------------------------------------------------------------------------
+# DRT files are ZIP archives containing XML. The active multicam angle for
+# each placed clip is stored in a protobuf FieldsBlob inside the clip's
+# color version entry. The camera name "Camera X" (X=1-9) is encoded as
+# ASCII within that blob:  1a=field-tag  08=length-8  43616d657261 20=b"Camera "  3X=digit
+# We read angles from source DRTs, track where each clip lands in the
+# destination, then export the destination DRT, patch the blobs, and
+# reimport — bypassing the missing scripting API for multicam angles.
+
+def _parse_drt_camera_angles(drt_path):
+    """
+    Open a DRT file and return {start_frame: camera_num} for every video
+    clip whose active angle was found in a FieldsBlob.
+    """
+    result = {}
+    try:
+        with zipfile.ZipFile(drt_path, 'r') as z:
+            seq_files = [
+                (name, z.getinfo(name).file_size)
+                for name in z.namelist()
+                if name.startswith('SeqContainer/') and name.endswith('.xml')
+            ]
+            if not seq_files:
+                return result
+            main_xml = max(seq_files, key=lambda x: x[1])[0]
+            xml_content = z.read(main_xml).decode('utf-8')
+    except Exception as e:
+        print("    DRT read error: {}".format(e))
+        return result
+
+    for clip_m in re.finditer(
+            r'<Sm2TiVideoClip[^>]*>(.*?)</Sm2TiVideoClip>',
+            xml_content, re.DOTALL):
+        block = clip_m.group(1)
+        start_m = re.search(r'<Start>(\d+)</Start>', block)
+        if not start_m:
+            continue
+        start_frame = int(start_m.group(1))
+
+        for blob_m in re.finditer(r'<FieldsBlob>([0-9a-fA-F]+)</FieldsBlob>', block):
+            blob = blob_m.group(1).lower()
+            cam_m = re.search(r'1a0843616d65726120(3[1-9])', blob)
+            if cam_m:
+                result[start_frame] = int(cam_m.group(1), 16) - 0x30
+                break
+
+    return result
+
+
+def _set_camera_in_blob(blob_hex, camera_num):
+    """Replace the camera angle digit in a FieldsBlob hex string (1-9)."""
+    if camera_num < 1 or camera_num > 9:
+        return blob_hex
+    new_digit = '{:02x}'.format(0x30 + camera_num)
+    return re.sub(
+        r'(1a0843616d65726120)3[0-9]',
+        lambda m: m.group(1) + new_digit,
+        blob_hex, flags=re.IGNORECASE, count=1,
+    )
+
+
+def build_source_camera_map(source_timelines, resolve, temp_dir):
+    """
+    Export each source timeline as DRT and parse camera angle data.
+    Returns {tl_name: {start_frame: camera_num}}.
+    """
+    angle_map = {}
+    for src in source_timelines:
+        tl = src['timeline']
+        tl_name = src['name']
+        safe_name = re.sub(r'[^\w-]', '_', tl_name)
+        drt_path = os.path.join(temp_dir, safe_name + '_src.drt')
+        try:
+            ok = tl.Export(drt_path, resolve.EXPORT_DRT, resolve.EXPORT_NONE)
+            if not ok:
+                print("  WARNING: DRT export failed for '{}'".format(tl_name))
+                continue
+            clips_map = _parse_drt_camera_angles(drt_path)
+            if clips_map:
+                angle_map[tl_name] = clips_map
+                print("  DRT angles: '{}' -> {} clip(s)".format(
+                    tl_name, len(clips_map)))
+        except Exception as e:
+            print("  WARNING: DRT angle parse error for '{}': {}".format(tl_name, e))
+    return angle_map
+
+
+def fix_multicam_angles_via_drt(dest_timeline, dest_camera_map, project,
+                                  media_pool, resolve, temp_dir):
+    """
+    Patch multicam angles by exporting the destination timeline as DRT,
+    modifying FieldsBlob camera values, deleting the original timeline,
+    and reimporting the patched DRT.
+    Returns the new Timeline object, or the original on error.
+    """
+    to_fix = {k: v for k, v in dest_camera_map.items() if v != 1}
+    if not to_fix:
+        return dest_timeline
+
+    tl_name = dest_timeline.GetName()
+    safe = re.sub(r'[^\w-]', '_', tl_name)
+    drt_orig  = os.path.join(temp_dir, safe + '_dest.drt')
+    drt_fixed = os.path.join(temp_dir, safe + '_dest_fixed.drt')
+
+    print("\nApplying multicam angles via DRT ({} clips to fix)...".format(len(to_fix)))
+
+    if not dest_timeline.Export(drt_orig, resolve.EXPORT_DRT, resolve.EXPORT_NONE):
+        print("  ERROR: DRT export of destination failed - angles not applied")
+        return dest_timeline
+
+    with zipfile.ZipFile(drt_orig, 'r') as z:
+        file_data = {name: z.read(name) for name in z.namelist()}
+
+    fixed_count = [0]
+
+    def patch_clip(m):
+        block = m.group(0)
+        start_m = re.search(r'<Start>(\d+)</Start>', block)
+        if not start_m:
+            return block
+        cam = to_fix.get(int(start_m.group(1)))
+        if cam is None:
+            return block
+
+        def patch_blob(bm):
+            new_hex = _set_camera_in_blob(bm.group(1).lower(), cam)
+            if new_hex != bm.group(1).lower():
+                fixed_count[0] += 1
+                return '<FieldsBlob>' + new_hex + '</FieldsBlob>'
+            return bm.group(0)
+
+        return re.sub(r'<FieldsBlob>([0-9a-fA-F]*)</FieldsBlob>', patch_blob, block)
+
+    for fname in list(file_data.keys()):
+        if fname.startswith('SeqContainer/') and fname.endswith('.xml'):
+            xml_str = file_data[fname].decode('utf-8')
+            patched = re.sub(
+                r'<Sm2TiVideoClip[^>]*>.*?</Sm2TiVideoClip>',
+                patch_clip, xml_str, flags=re.DOTALL,
+            )
+            file_data[fname] = patched.encode('utf-8')
+
+    with zipfile.ZipFile(drt_fixed, 'w', zipfile.ZIP_DEFLATED) as z:
+        for fname, content in file_data.items():
+            z.writestr(fname, content)
+
+    print("  Patched {} FieldsBlob(s)".format(fixed_count[0]))
+
+    if not media_pool.DeleteTimelines([dest_timeline]):
+        print("  ERROR: Could not delete destination timeline - angles not applied")
+        return dest_timeline
+
+    new_tl = media_pool.ImportTimelineFromFile(drt_fixed, {})
+    if not new_tl:
+        print("  CRITICAL: DRT reimport failed - original timeline was deleted!")
+        return None
+
+    if new_tl.GetName() != tl_name:
+        new_tl.SetName(tl_name)
+
+    project.SetCurrentTimeline(new_tl)
+    print("  Multicam angles applied -> '{}'".format(new_tl.GetName()))
+    return new_tl
+
+
+# ---------------------------------------------------------------------------
+# Core clip / marker / timeline operations
+# ---------------------------------------------------------------------------
+
 def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
-                            media_pool, fps, num_tracks):
+                            media_pool, fps, num_tracks, source_angle_map=None):
     """
     Copy video clips from src_data timeline where source TC overlaps [tc_in, tc_out).
-    Clip TC = timeline Start TC + item.GetStart() — correct for multitrack clips
-    whose media has relative TC (starting at 00:00:00:00).
-    record_start: destination frame (0-based from dest timeline start) where tc_in lands.
-    Returns (placed, failed).
+    Returns (placed, failed, angle_assignments).
+    angle_assignments: {dest_start_frame: camera_num} for clips that need a fix.
     """
     tl = src_data['timeline']
     placed = 0
     failed = 0
+    angle_assignments = {}
 
     for track_idx in range(1, num_tracks + 1):
         items = tl.GetItemListInTrack("video", track_idx)
@@ -170,38 +341,36 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
                 continue
 
             # item.GetStart() / GetEnd() return absolute TC frame numbers
-            # (they include the timeline's Start TC offset), so use them directly
-            # without adding src_tc_start — that would double-count the offset.
-            item_tc_in = item.GetStart()
+            item_tc_in  = item.GetStart()
             item_tc_out = item.GetEnd()
 
-            # Intersection with requested TC range
-            overlap_in = max(item_tc_in, tc_in)
+            overlap_in  = max(item_tc_in, tc_in)
             overlap_out = min(item_tc_out, tc_out)
             if overlap_in >= overlap_out:
                 continue
 
-            # Source in/out within the media file
-            left_offset = item.GetLeftOffset()
-            src_in = left_offset + (overlap_in - item_tc_in)
-            src_out = src_in + (overlap_out - overlap_in)
-
-            # Record position in destination timeline
+            left_offset  = item.GetLeftOffset()
+            src_in       = left_offset + (overlap_in - item_tc_in)
+            src_out      = src_in + (overlap_out - overlap_in)
             record_frame = record_start + (overlap_in - tc_in)
 
             clip_info = {
                 "mediaPoolItem": media_item,
-                "startFrame": src_in,
-                "endFrame": src_out,
-                "mediaType": 1,
-                "trackIndex": track_idx,
-                "recordFrame": record_frame,
+                "startFrame":    src_in,
+                "endFrame":      src_out,
+                "mediaType":     1,
+                "trackIndex":    track_idx,
+                "recordFrame":   record_frame,
             }
 
             result = media_pool.AppendToTimeline([clip_info])
             if result:
                 placed += 1
                 track_placed += 1
+                if source_angle_map is not None:
+                    cam = source_angle_map.get(item_tc_in, 1)
+                    if cam != 1:
+                        angle_assignments[result[0].GetStart()] = cam
             else:
                 failed += 1
                 print("    FAILED: {} on V{}".format(item.GetName(), track_idx))
@@ -209,7 +378,7 @@ def copy_clips_from_source(src_data, tc_in, tc_out, record_start,
         if track_idx > 1 and track_placed > 0:
             print("    V{}: placed {}".format(track_idx, track_placed))
 
-    return placed, failed
+    return placed, failed, angle_assignments
 
 
 def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timeline, fps):
@@ -227,7 +396,7 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
 
     copied = 0
     for frame_pos, data in markers.items():
-        # frame_pos from GetMarkers() is relative to timeline start (0-based),
+        # GetMarkers() frame_pos is relative to timeline start (0-based),
         # unlike item.GetStart() which returns absolute TC frames.
         marker_tc = src_tc_start + frame_pos
         if not (tc_in <= marker_tc < tc_out):
@@ -235,8 +404,7 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
 
         dest_frame = record_start + (marker_tc - tc_in)
 
-        # Clamp marker duration so it doesn't exceed the copied range
-        max_duration = (tc_out - marker_tc)
+        max_duration = tc_out - marker_tc
         duration = min(data.get('duration', 1), max_duration)
         duration = max(duration, 1)
 
@@ -256,7 +424,7 @@ def copy_markers_from_source(src_data, tc_in, tc_out, record_start, dest_timelin
 
 def create_dest_timeline(project, media_pool, aaf_timeline, suffix):
     new_name = aaf_timeline.GetName() + suffix
-    fps = aaf_timeline.GetSetting("timelineFrameRate")
+    fps      = aaf_timeline.GetSetting("timelineFrameRate")
     start_tc = aaf_timeline.GetStartTimecode()
 
     new_tl = media_pool.CreateEmptyTimeline(new_name)
@@ -273,7 +441,7 @@ def create_dest_timeline(project, media_pool, aaf_timeline, suffix):
 
 def copy_audio_from_aaf(aaf_tl, dest_tl, media_pool):
     audio_count = aaf_tl.GetTrackCount("audio")
-    dest_count = dest_tl.GetTrackCount("audio")
+    dest_count  = dest_tl.GetTrackCount("audio")
     while dest_count < audio_count:
         dest_tl.AddTrack("audio")
         new_count = dest_tl.GetTrackCount("audio")
@@ -294,10 +462,10 @@ def copy_audio_from_aaf(aaf_tl, dest_tl, media_pool):
                 continue
             clip_info = {
                 "mediaPoolItem": mpi,
-                "startFrame": item.GetLeftOffset(),
-                "endFrame": item.GetLeftOffset() + item.GetDuration(),
-                "trackIndex": track_idx,
-                "recordFrame": item.GetStart(),
+                "startFrame":    item.GetLeftOffset(),
+                "endFrame":      item.GetLeftOffset() + item.GetDuration(),
+                "trackIndex":    track_idx,
+                "recordFrame":   item.GetStart(),
             }
             if media_pool.AppendToTimeline([clip_info]):
                 copied += 1
@@ -320,7 +488,7 @@ def ensure_video_tracks(timeline, count):
 def show_settings_dialog(bins, fusion):
     global _config
 
-    ui = fusion.UIManager
+    ui   = fusion.UIManager
     disp = bmd.UIDispatcher(ui)
     result = {'bin_idx': -1, 'cancelled': True}
 
@@ -398,12 +566,12 @@ def show_settings_dialog(bins, fusion):
         combo.CurrentIndex = default_idx
 
     def on_start(ev):
-        _config['video_tracks_count'] = win.Find('TrackCount').Value
+        _config['video_tracks_count']  = win.Find('TrackCount').Value
         raw = win.Find('IgnorePrefixes').Text
-        _config['ignore_prefixes'] = [p.strip() for p in raw.split(',') if p.strip()]
+        _config['ignore_prefixes']     = [p.strip() for p in raw.split(',') if p.strip()]
         _config['create_new_timeline'] = win.Find('CreateNew').Checked
         _config['new_timeline_suffix'] = win.Find('Suffix').Text
-        result['bin_idx'] = win.Find('BinCombo').CurrentIndex
+        result['bin_idx']   = win.Find('BinCombo').CurrentIndex
         result['cancelled'] = False
         disp.ExitLoop()
 
@@ -413,9 +581,9 @@ def show_settings_dialog(bins, fusion):
     def on_close(ev):
         disp.ExitLoop()
 
-    win.On.StartBtn.Clicked = on_start
+    win.On.StartBtn.Clicked  = on_start
     win.On.CancelBtn.Clicked = on_cancel
-    win.On.AlignWin.Close = on_close
+    win.On.AlignWin.Close    = on_close
 
     win.Show()
     disp.RunLoop()
@@ -423,6 +591,10 @@ def show_settings_dialog(bins, fusion):
 
     return -1 if result['cancelled'] else result['bin_idx']
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     print("")
@@ -440,7 +612,7 @@ def main():
         print("ERROR: No project open")
         return
 
-    media_pool = project.GetMediaPool()
+    media_pool   = project.GetMediaPool()
     aaf_timeline = project.GetCurrentTimeline()
     if not aaf_timeline:
         print("ERROR: No timeline open. Open the AAF timeline first.")
@@ -451,15 +623,13 @@ def main():
     print("AAF timeline : {}".format(aaf_timeline.GetName()))
     print("Frame rate   : {} fps".format(fps))
 
-    # Collect all bins with clips
     all_bins = []
     get_all_bins(media_pool.GetRootFolder(), all_bins)
     if not all_bins:
         print("ERROR: No bins with clips found in media pool")
         return
 
-    # Show settings dialog or fall back to auto-detect
-    fusion = get_fusion()
+    fusion       = get_fusion()
     selected_idx = -1
 
     if fusion:
@@ -483,7 +653,7 @@ def main():
     source_bin = all_bins[selected_idx]['folder']
     num_tracks = _config['video_tracks_count']
     create_new = _config['create_new_timeline']
-    suffix = _config['new_timeline_suffix']
+    suffix     = _config['new_timeline_suffix']
 
     print("")
     print("Source bin   : {}".format(source_bin.GetName()))
@@ -494,10 +664,18 @@ def main():
     source_timelines = load_source_timelines(source_bin, project, fps)
     if not source_timelines:
         print("ERROR: No valid timelines found in bin.")
-        print("       Make sure timelines have a valid Start Timecode set.")
         return
 
-    # Read AAF audio track 1 to drive the alignment
+    # Create temp dir for DRT operations
+    temp_dir = tempfile.mkdtemp(prefix='resolve_align_')
+
+    # Parse camera angles from source DRTs before placing any clips
+    print("")
+    print("Loading multicam angle data from source DRTs...")
+    source_camera_map = build_source_camera_map(source_timelines, resolve, temp_dir)
+    if not source_camera_map:
+        print("  (no multicam angle data found - skipping angle fix)")
+
     print("")
     print("Reading AAF audio track 1...")
     audio_items = aaf_timeline.GetItemListInTrack("audio", 1)
@@ -506,7 +684,6 @@ def main():
         return
     print("Found {} audio clips".format(len(audio_items)))
 
-    # Prepare destination timeline
     dest_timeline = aaf_timeline
     if create_new:
         print("")
@@ -520,15 +697,15 @@ def main():
 
     ensure_video_tracks(dest_timeline, num_tracks)
 
-    # Main alignment loop
     print("")
     print("Aligning...")
     print("-" * 60)
 
-    total_placed = 0
-    total_failed = 0
-    total_markers = 0
+    total_placed   = 0
+    total_failed   = 0
+    total_markers  = 0
     no_match_count = 0
+    dest_camera_map = {}  # {dest_start_frame: camera_num}
 
     for audio_item in audio_items:
         clip_name = audio_item.GetName()
@@ -537,9 +714,7 @@ def main():
             print("SKIP  : {}".format(clip_name))
             continue
 
-        # Read source TC from the clip — works even for offline (red) clips
-        # because Resolve stores TC metadata in the project database.
-        # Try MediaPoolItem first, then fall back to TimelineItem.GetClipProperty.
+        # Read source TC - works even for offline clips via project DB
         tc_str = None
         mpi = audio_item.GetMediaPoolItem()
         if mpi:
@@ -554,11 +729,11 @@ def main():
         if clip_start_frames is None:
             continue
 
-        left_offset = audio_item.GetLeftOffset()
+        left_offset  = audio_item.GetLeftOffset()
         record_start = audio_item.GetStart()
-        duration = audio_item.GetDuration()
+        duration     = audio_item.GetDuration()
 
-        tc_in = clip_start_frames + left_offset
+        tc_in  = clip_start_frames + left_offset
         tc_out = tc_in + duration
 
         src = find_source_timeline(tc_in, source_timelines)
@@ -568,17 +743,18 @@ def main():
             continue
 
         print("MATCH : {} -> '{}' [{}]".format(
-            clip_name,
-            src['name'],
-            frames_to_tc(tc_in, fps),
+            clip_name, src['name'], frames_to_tc(tc_in, fps),
         ))
 
-        placed, failed = copy_clips_from_source(
+        src_angle_map = source_camera_map.get(src['name'], {})
+
+        placed, failed, angles = copy_clips_from_source(
             src, tc_in, tc_out, record_start,
-            media_pool, fps, num_tracks,
+            media_pool, fps, num_tracks, src_angle_map,
         )
         total_placed += placed
         total_failed += failed
+        dest_camera_map.update(angles)
 
         markers_copied = copy_markers_from_source(
             src, tc_in, tc_out, record_start, dest_timeline, fps,
@@ -588,6 +764,21 @@ def main():
             print("  + {} marker(s)".format(markers_copied))
 
     print("-" * 60)
+
+    # Restore multicam angles via DRT patch
+    if dest_camera_map:
+        dest_timeline = fix_multicam_angles_via_drt(
+            dest_timeline, dest_camera_map,
+            project, media_pool, resolve, temp_dir,
+        )
+
+    # Clean up temp files
+    try:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception:
+        pass
+
     print("")
     print("=" * 60)
     print("  DONE")
@@ -595,9 +786,12 @@ def main():
     if total_failed:
         print("  Placement failures : {}".format(total_failed))
     print("  Markers copied     : {}".format(total_markers))
+    if dest_camera_map:
+        non1 = len([v for v in dest_camera_map.values() if v != 1])
+        print("  Multicam angles fixed : {}".format(non1))
     if no_match_count:
         print("  Audio clips with no TC match : {}".format(no_match_count))
-    if create_new:
+    if create_new and dest_timeline:
         print("  Destination timeline : '{}'".format(dest_timeline.GetName()))
     print("=" * 60)
     print("")
